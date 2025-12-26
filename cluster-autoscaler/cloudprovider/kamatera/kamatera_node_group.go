@@ -36,13 +36,16 @@ import (
 // configuration info and functions to control a set of nodes that have the
 // same capacity and set of labels.
 type NodeGroup struct {
-	id           string
-	manager      *manager
-	minSize      int
-	maxSize      int
-	instances    map[string]*Instance // key is the instance ID
-	serverConfig ServerConfig
+	id             string
+	manager        *manager
+	minSize        int
+	maxSize        int
+	instances      map[string]*Instance // key is the instance ID
+	serverConfig   ServerConfig
+	templateLabels []string
 }
+
+var _ cloudprovider.NodeGroup = (*NodeGroup)(nil)
 
 // MaxSize returns maximum size of the node group.
 func (n *NodeGroup) MaxSize() int {
@@ -72,6 +75,7 @@ func (n *NodeGroup) IncreaseSize(delta int) error {
 
 	currentSize := len(n.instances)
 	targetSize := currentSize + delta
+	klog.V(4).Infof("Increasing size of node group %s from %d to %d", n.id, currentSize, targetSize)
 	if targetSize > n.MaxSize() {
 		return fmt.Errorf("size increase is too large. current: %d desired: %d max: %d",
 			currentSize, targetSize, n.MaxSize())
@@ -79,9 +83,11 @@ func (n *NodeGroup) IncreaseSize(delta int) error {
 
 	err := n.createInstances(delta)
 	if err != nil {
+		klog.V(4).Infof("Failed to increase size of node group %s from %d to %d: %v", n.id, currentSize, targetSize, err)
 		return err
 	}
 
+	klog.V(4).Infof("Finished increasing size of node group %s to %d", n.id, targetSize)
 	return nil
 }
 
@@ -94,6 +100,7 @@ func (n *NodeGroup) AtomicIncreaseSize(delta int) error {
 // failure or if the given node doesn't belong to this node group. This function
 // should wait until node group size is updated. Implementation required.
 func (n *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
+	klog.V(4).Infof("Deleting %d nodes from node group %s", len(nodes), n.id)
 	for _, node := range nodes {
 		instance, err := n.findInstanceForNode(node)
 		if err != nil {
@@ -109,6 +116,7 @@ func (n *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 				node.Name, node.Spec.ProviderID, err)
 		}
 	}
+	klog.V(4).Infof("Finished deleting %d nodes from node group %s", len(nodes), n.id)
 	return nil
 }
 
@@ -144,9 +152,13 @@ func (n *NodeGroup) Debug() string {
 // This list should include also instances that might have not become a kubernetes node yet.
 func (n *NodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 	var instances []cloudprovider.Instance
+	providerIDPrefix := ""
+	if n.manager != nil && n.manager.config != nil {
+		providerIDPrefix = n.manager.config.providerIDPrefix
+	}
 	for _, instance := range n.instances {
 		instances = append(instances, cloudprovider.Instance{
-			Id:     instance.Id,
+			Id:     formatKamateraProviderID(providerIDPrefix, instance.Id),
 			Status: instance.Status,
 		})
 	}
@@ -164,10 +176,17 @@ func (n *NodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource list for node group %s error: %v", n.id, err)
 	}
+	labels := make(map[string]string)
+	for _, templateLabel := range n.templateLabels {
+		parts := strings.SplitN(templateLabel, "=", 2)
+		if len(parts) == 2 {
+			labels[parts[0]] = parts[1]
+		}
+	}
 	node := apiv1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   kamateraServerName(""),
-			Labels: map[string]string{},
+			Labels: labels,
 		},
 		Status: apiv1.NodeStatus{
 			Capacity:   resourceList,
@@ -213,16 +232,21 @@ func (n *NodeGroup) GetOptions(defaults config.NodeGroupAutoscalingOptions) (*co
 }
 
 func (n *NodeGroup) findInstanceForNode(node *apiv1.Node) (*Instance, error) {
+	providerIDPrefix := ""
+	if n.manager != nil && n.manager.config != nil {
+		providerIDPrefix = n.manager.config.providerIDPrefix
+	}
+	parsedProviderID := parseKamateraProviderID(providerIDPrefix, node.Spec.ProviderID)
 	for _, instance := range n.instances {
-		if instance.Id == node.Spec.ProviderID {
+		if instance.Id == parsedProviderID {
 			klog.V(2).Infof("findInstanceForNode(%s): found based on node ProviderID", node.Name)
 			return instance, nil
-		} else if node.Spec.ProviderID == "" && instance.Id == node.Name {
+		} else if parsedProviderID == "" && instance.Id == node.Name {
 			klog.V(2).Infof("findInstanceForNode(%s): found based on node Id", node.Name)
 			// Rancher does not set providerID for nodes, so we use node name as providerID
 			// We also set the ProviderID as some autoscaler code expects it to be set
-			node.Spec.ProviderID = instance.Id
-			err := setNodeProviderID(n.manager.kubeClient, node.Name, instance.Id)
+			node.Spec.ProviderID = formatKamateraProviderID(providerIDPrefix, instance.Id)
+			err := setNodeProviderID(n.manager.kubeClient, node.Name, node.Spec.ProviderID)
 			if err != nil {
 				// this is not a critical error, the autoscaler can continue functioning in this condition
 				// as the same node object is used in later code the ProviderID change will be picked up
@@ -303,7 +327,7 @@ func (n *NodeGroup) getResourceList() (apiv1.ResourceList, error) {
 		// TODO somehow determine the actual pods that will be running
 		apiv1.ResourcePods:    *resource.NewQuantity(110, resource.DecimalSI),
 		apiv1.ResourceCPU:     *resource.NewQuantity(int64(cpuCores), resource.DecimalSI),
-		apiv1.ResourceMemory:  *resource.NewQuantity(int64(ramMb*1024*1024*1024), resource.DecimalSI),
+		apiv1.ResourceMemory:  *resource.NewQuantity(int64(ramMb*1024*1024), resource.DecimalSI),
 		apiv1.ResourceStorage: *resource.NewQuantity(int64(firstDiskSizeGb*1024*1024*1024), resource.DecimalSI),
 	}, nil
 }
