@@ -254,6 +254,32 @@ func TestNodeGroup_TemplateNodeInfo(t *testing.T) {
 		apiv1.ResourceMemory:  *resource.NewQuantity(int64(1024*1024*1024*1024), resource.DecimalSI),
 		apiv1.ResourceStorage: *resource.NewQuantity(int64(50*1024*1024*1024), resource.DecimalSI),
 	})
+	assert.Equal(t, map[string]string{}, nodeInfo.Node().Labels)
+
+	// test with template labels
+	ng.templateLabels = []string{"disktype=ssd", "kubernetes.io/os=linux"}
+	nodeInfo, err = ng.TemplateNodeInfo()
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"disktype":         "ssd",
+		"kubernetes.io/os": "linux",
+	}, nodeInfo.Node().Labels)
+
+	// test with invalid label format (missing =)
+	ng.templateLabels = []string{"invalidlabel", "valid=label"}
+	nodeInfo, err = ng.TemplateNodeInfo()
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"valid": "label",
+	}, nodeInfo.Node().Labels)
+
+	// test with label containing = in value
+	ng.templateLabels = []string{"key=value=with=equals"}
+	nodeInfo, err = ng.TemplateNodeInfo()
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"key": "value=with=equals",
+	}, nodeInfo.Node().Labels)
 }
 
 func TestNodeGroup_Others(t *testing.T) {
