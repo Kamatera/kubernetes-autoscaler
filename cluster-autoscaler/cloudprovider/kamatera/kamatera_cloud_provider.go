@@ -22,8 +22,6 @@ import (
 	"os"
 
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -34,6 +32,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/gpu"
 	"k8s.io/client-go/informers"
+	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
 	klog "k8s.io/klog/v2"
 )
 
@@ -50,6 +49,8 @@ type kamateraCloudProvider struct {
 	resourceLimiter *cloudprovider.ResourceLimiter
 }
 
+var _ cloudprovider.CloudProvider = (*kamateraCloudProvider)(nil)
+
 // Name returns name of the cloud provider.
 func (k *kamateraCloudProvider) Name() string {
 	return cloudprovider.KamateraProviderName
@@ -57,12 +58,12 @@ func (k *kamateraCloudProvider) Name() string {
 
 // NodeGroups returns all node groups configured for this cloud provider.
 func (k *kamateraCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
-	nodeGroups := make([]cloudprovider.NodeGroup, len(k.manager.nodeGroups))
-	i := 0
+	k.manager.nodeGroupsMu.RLock()
+	nodeGroups := make([]cloudprovider.NodeGroup, 0, len(k.manager.nodeGroups))
 	for _, ng := range k.manager.nodeGroups {
-		nodeGroups[i] = ng
-		i++
+		nodeGroups = append(nodeGroups, ng)
 	}
+	k.manager.nodeGroupsMu.RUnlock()
 	return nodeGroups
 }
 
@@ -70,7 +71,13 @@ func (k *kamateraCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
 // should not be processed by cluster autoscaler, or non-nil error if such
 // occurred. Must be implemented.
 func (k *kamateraCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovider.NodeGroup, error) {
+	k.manager.nodeGroupsMu.RLock()
+	nodeGroups := make([]*NodeGroup, 0, len(k.manager.nodeGroups))
 	for _, ng := range k.manager.nodeGroups {
+		nodeGroups = append(nodeGroups, ng)
+	}
+	k.manager.nodeGroupsMu.RUnlock()
+	for _, ng := range nodeGroups {
 		instance, err := ng.findInstanceForNode(node)
 		if err != nil {
 			return nil, err
@@ -136,7 +143,14 @@ func (k *kamateraCloudProvider) Cleanup() error {
 // Refresh is called before every main loop and can be used to dynamically update cloud provider state.
 // In particular the list of node groups returned by NodeGroups can change as a result of CloudProvider.Refresh().
 func (k *kamateraCloudProvider) Refresh() error {
-	return k.manager.refresh()
+	klog.V(4).Infof("Refreshing Kamatera node groups")
+	err := k.manager.refresh()
+	if err != nil {
+		klog.V(4).Infof("Failed to refresh Kamatera node groups: %v", err)
+		return err
+	}
+	klog.V(4).Infof("Finished refreshing Kamatera node groups")
+	return nil
 }
 
 // BuildKamatera builds the Kamatera cloud provider.
@@ -171,6 +185,7 @@ func newKamateraCloudProvider(config io.Reader, rl *cloudprovider.ResourceLimite
 		klog.V(1).Infof("Error on first import of Kamatera node groups: %v", err)
 	}
 	klog.V(1).Infof("First import of existing Kamatera node groups ended")
+	m.nodeGroupsMu.RLock()
 	if len(m.nodeGroups) == 0 {
 		klog.V(1).Infof("Could not import any Kamatera node groups")
 	} else {
@@ -179,6 +194,7 @@ func newKamateraCloudProvider(config io.Reader, rl *cloudprovider.ResourceLimite
 			klog.V(1).Infof("%s", ng.extendedDebug())
 		}
 	}
+	m.nodeGroupsMu.RUnlock()
 
 	return &kamateraCloudProvider{
 		manager:         m,
@@ -186,15 +202,6 @@ func newKamateraCloudProvider(config io.Reader, rl *cloudprovider.ResourceLimite
 	}, nil
 }
 
-func getKubeConfig(opts config.AutoscalingOptions) *rest.Config {
-	klog.V(1).Infof("Using kubeconfig file: %s", opts.KubeClientOpts.KubeConfigPath)
-	kubeConfig, err := clientcmd.BuildConfigFromFlags("", opts.KubeClientOpts.KubeConfigPath)
-	if err != nil {
-		klog.Fatalf("Failed to build kubeConfig: %v", err)
-	}
-	return kubeConfig
-}
-
 func createKubeClient(opts config.AutoscalingOptions) kubernetes.Interface {
-	return kubernetes.NewForConfigOrDie(getKubeConfig(opts))
+	return kubernetes.NewForConfigOrDie(kube_util.GetKubeConfig(opts.KubeClientOpts))
 }
