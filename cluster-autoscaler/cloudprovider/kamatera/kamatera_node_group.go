@@ -36,12 +36,13 @@ import (
 // configuration info and functions to control a set of nodes that have the
 // same capacity and set of labels.
 type NodeGroup struct {
-	id           string
-	manager      *manager
-	minSize      int
-	maxSize      int
-	instances    map[string]*Instance // key is the instance ID
-	serverConfig ServerConfig
+	id             string
+	manager        *manager
+	minSize        int
+	maxSize        int
+	instances      map[string]*Instance // key is the instance ID
+	serverConfig   ServerConfig
+	templateLabels []string
 }
 
 // MaxSize returns maximum size of the node group.
@@ -164,10 +165,17 @@ func (n *NodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource list for node group %s error: %v", n.id, err)
 	}
+	labels := make(map[string]string)
+	for _, templateLabel := range n.templateLabels {
+		parts := strings.SplitN(templateLabel, "=", 2)
+		if len(parts) == 2 {
+			labels[parts[0]] = parts[1]
+		}
+	}
 	node := apiv1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   kamateraServerName(""),
-			Labels: map[string]string{},
+			Labels: labels,
 		},
 		Status: apiv1.NodeStatus{
 			Capacity:   resourceList,

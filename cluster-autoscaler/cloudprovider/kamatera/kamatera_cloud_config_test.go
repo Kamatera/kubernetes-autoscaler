@@ -147,6 +147,31 @@ max-size=2
 	assert.Equal(t, "t10000", config.nodeGroupCfg["highcpu"].MonthlyPackage)
 	assert.Equal(t, "aGlnaGJwdQo=", config.nodeGroupCfg["highcpu"].ScriptBase64)
 
+	// test template labels parsing
+	cfg = strings.NewReader(`
+[global]
+kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i
+kamatera-api-secret=9ii88h7g6f55555ee4444444dd33eee2
+cluster-name=aaabbb
+default-script-base64=ZGVmYXVsdAo=
+default-datacenter=IL
+default-image=ubuntu-2204
+default-cpu=1a
+default-ram=1024
+default-disk=size=10
+default-network=name=wan,ip=auto
+
+[nodegroup "default"]
+
+[nodegroup "withlabels"]
+template-label=disktype=ssd
+template-label=kubernetes.io/os=linux
+`)
+	config, err = buildCloudConfig(cfg)
+	assert.NoError(t, err)
+	assert.Nil(t, config.nodeGroupCfg["default"].TemplateLabels)
+	assert.Equal(t, []string{"disktype=ssd", "kubernetes.io/os=linux"}, config.nodeGroupCfg["withlabels"].TemplateLabels)
+
 	cfg = strings.NewReader(`
 [global]
 kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i

@@ -48,6 +48,7 @@ type nodeGroupConfig struct {
 	BillingCycle   string
 	MonthlyPackage string
 	ScriptBase64   string
+	TemplateLabels []string
 }
 
 // kamateraConfig holds the configuration for the Kamatera provider.
@@ -105,6 +106,7 @@ type GcfgNodeGroupConfig struct {
 	BillingCycle   string   `gcfg:"billingcycle"`
 	MonthlyPackage string   `gcfg:"monthlypackage"`
 	ScriptBase64   string   `gcfg:"script-base64"`
+	TemplateLabels []string `gcfg:"template-label"`
 }
 
 // gcfgCloudConfig is the gcfg representation of the cloud config file for Kamatera.
@@ -224,6 +226,7 @@ func buildCloudConfig(config io.Reader) (*kamateraConfig, error) {
 		if len(gcfgNodeGroup.ScriptBase64) > 0 {
 			scriptBase64 = gcfgNodeGroup.ScriptBase64
 		}
+		templateLabels := gcfgNodeGroup.TemplateLabels
 		ngc := &nodeGroupConfig{
 			maxSize:        maxSize,
 			minSize:        minSize,
@@ -241,6 +244,7 @@ func buildCloudConfig(config io.Reader) (*kamateraConfig, error) {
 			BillingCycle:   billingCycle,
 			MonthlyPackage: monthlyPackage,
 			ScriptBase64:   scriptBase64,
+			TemplateLabels: templateLabels,
 		}
 		nodeGroupCfg[nodeGroupName] = ngc
 	}
