@@ -114,7 +114,7 @@ cluster-name=aaabbb
 	// test ok on getting the right node group for an apiv1.Node
 	node := &apiv1.Node{
 		Spec: apiv1.NodeSpec{
-			ProviderID: kamateraServerName1,
+			ProviderID: formatKamateraProviderID(kamateraServerName1),
 		},
 	}
 	ng, err := kcp.NodeGroupForNode(node)
@@ -124,7 +124,7 @@ cluster-name=aaabbb
 	// test ok on getting the right node group for an apiv1.Node
 	node = &apiv1.Node{
 		Spec: apiv1.NodeSpec{
-			ProviderID: kamateraServerName4,
+			ProviderID: formatKamateraProviderID(kamateraServerName4),
 		},
 	}
 	ng, err = kcp.NodeGroupForNode(node)
