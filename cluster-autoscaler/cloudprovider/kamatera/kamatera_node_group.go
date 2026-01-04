@@ -45,6 +45,8 @@ type NodeGroup struct {
 	templateLabels []string
 }
 
+var _ cloudprovider.NodeGroup = (*NodeGroup)(nil)
+
 // MaxSize returns maximum size of the node group.
 func (n *NodeGroup) MaxSize() int {
 	return n.maxSize
@@ -73,6 +75,7 @@ func (n *NodeGroup) IncreaseSize(delta int) error {
 
 	currentSize := len(n.instances)
 	targetSize := currentSize + delta
+	klog.V(4).Infof("Increasing size of node group %s from %d to %d", n.id, currentSize, targetSize)
 	if targetSize > n.MaxSize() {
 		return fmt.Errorf("size increase is too large. current: %d desired: %d max: %d",
 			currentSize, targetSize, n.MaxSize())
@@ -80,9 +83,11 @@ func (n *NodeGroup) IncreaseSize(delta int) error {
 
 	err := n.createInstances(delta)
 	if err != nil {
+		klog.V(4).Infof("Failed to increase size of node group %s from %d to %d: %v", n.id, currentSize, targetSize, err)
 		return err
 	}
 
+	klog.V(4).Infof("Finished increasing size of node group %s to %d", n.id, targetSize)
 	return nil
 }
 
@@ -95,6 +100,7 @@ func (n *NodeGroup) AtomicIncreaseSize(delta int) error {
 // failure or if the given node doesn't belong to this node group. This function
 // should wait until node group size is updated. Implementation required.
 func (n *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
+	klog.V(4).Infof("Deleting %d nodes from node group %s", len(nodes), n.id)
 	for _, node := range nodes {
 		instance, err := n.findInstanceForNode(node)
 		if err != nil {
@@ -110,6 +116,7 @@ func (n *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 				node.Name, node.Spec.ProviderID, err)
 		}
 	}
+	klog.V(4).Infof("Finished deleting %d nodes from node group %s", len(nodes), n.id)
 	return nil
 }
 
