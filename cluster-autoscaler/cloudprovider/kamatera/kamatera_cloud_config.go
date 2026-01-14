@@ -58,6 +58,7 @@ type kamateraConfig struct {
 	apiUrl           string
 	clusterName      string
 	filterNamePrefix string
+	providerIDPrefix string
 	defaultMinSize   int
 	defaultMaxSize   int
 	nodeGroupCfg     map[string]*nodeGroupConfig // key is the node group name
@@ -70,6 +71,7 @@ type GcfgGlobalConfig struct {
 	KamateraApiUrl        string   `gcfg:"kamatera-api-url"`
 	ClusterName           string   `gcfg:"cluster-name"`
 	FilterNamePrefix      string   `gcfg:"filter-name-prefix"`
+	ProviderIDPrefix      string   `gcfg:"provider-id-prefix"`
 	DefaultMinSize        string   `gcfg:"default-min-size"`
 	DefaultMaxSize        string   `gcfg:"default-max-size"`
 	DefaultNamePrefix     string   `gcfg:"default-name-prefix"`
@@ -148,6 +150,10 @@ func buildCloudConfig(config io.Reader) (*kamateraConfig, error) {
 	}
 
 	filterNamePrefix := gcfgCloudConfig.Global.FilterNamePrefix
+	providerIDPrefix := gcfgCloudConfig.Global.ProviderIDPrefix
+	if providerIDPrefix == "" {
+		providerIDPrefix = defaultKamateraProviderIDPrefix
+	}
 
 	// get the default min and max size as defined in the global section of the config file
 	defaultMinSize, defaultMaxSize, err := getSizeLimits(
@@ -255,6 +261,7 @@ func buildCloudConfig(config io.Reader) (*kamateraConfig, error) {
 		apiSecret:        apiSecret,
 		apiUrl:           apiUrl,
 		filterNamePrefix: filterNamePrefix,
+		providerIDPrefix: providerIDPrefix,
 		defaultMinSize:   defaultMinSize,
 		defaultMaxSize:   defaultMaxSize,
 		nodeGroupCfg:     nodeGroupCfg,

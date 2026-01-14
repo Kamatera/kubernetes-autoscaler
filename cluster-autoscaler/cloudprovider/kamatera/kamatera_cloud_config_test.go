@@ -105,6 +105,7 @@ max-size=2
 	assert.Equal(t, "1a222bbb3ccc44d5555e6ff77g88hh9i", config.apiClientId)
 	assert.Equal(t, "9ii88h7g6f55555ee4444444dd33eee2", config.apiSecret)
 	assert.Equal(t, "aaabbb", config.clusterName)
+	assert.Equal(t, defaultKamateraProviderIDPrefix, config.providerIDPrefix)
 	assert.Equal(t, 1, config.defaultMinSize)
 	assert.Equal(t, 10, config.defaultMaxSize)
 	assert.Equal(t, 3, len(config.nodeGroupCfg))
@@ -171,6 +172,34 @@ template-label=kubernetes.io/os=linux
 	assert.NoError(t, err)
 	assert.Nil(t, config.nodeGroupCfg["default"].TemplateLabels)
 	assert.Equal(t, []string{"disktype=ssd", "kubernetes.io/os=linux"}, config.nodeGroupCfg["withlabels"].TemplateLabels)
+
+	// test provider-id-prefix parsing
+	cfg = strings.NewReader(`
+[global]
+kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i
+kamatera-api-secret=9ii88h7g6f55555ee4444444dd33eee2
+cluster-name=aaabbb
+provider-id-prefix=kamatera:///
+
+[nodegroup "default"]
+`)
+	config, err = buildCloudConfig(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, "kamatera:///", config.providerIDPrefix)
+
+	// test empty provider-id-prefix falls back to default
+	cfg = strings.NewReader(`
+[global]
+kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i
+kamatera-api-secret=9ii88h7g6f55555ee4444444dd33eee2
+cluster-name=aaabbb
+provider-id-prefix=
+
+[nodegroup "default"]
+`)
+	config, err = buildCloudConfig(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, defaultKamateraProviderIDPrefix, config.providerIDPrefix)
 
 	cfg = strings.NewReader(`
 [global]

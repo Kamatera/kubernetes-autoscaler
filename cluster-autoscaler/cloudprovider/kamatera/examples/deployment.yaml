@@ -131,6 +131,7 @@ stringData:
     kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i
     kamatera-api-secret=9ii88h7g6f55555ee4444444dd33eee2
     cluster-name=aaabbb
+    provider-id-prefix=kamatera://
     default-min-size=1
     default-max-size=10
     default-password=Aa123456789!
