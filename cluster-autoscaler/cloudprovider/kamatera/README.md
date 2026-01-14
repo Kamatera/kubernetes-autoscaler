@@ -172,3 +172,27 @@ docker push ghcr.io/github_username_lowercase/cluster-autoscaler-amd64
 Make sure relevant clsuter has access to this registry/image.
 
 Follow the documentation for deploying the image and using the autoscaler.
+
+## End to End Tests
+
+```
+cd cluster-autoscaler
+make make-image
+CLUSTER_AUTOSCALER_IMAGE="ghcr.io/kamatera/kubernetes-autoscaler:localdev$(date +%s)"
+docker tag gcr.io/k8s-staging-autoscaling/cluster-autoscaler-amd64:dev $CLUSTER_AUTOSCALER_IMAGE
+docker push $CLUSTER_AUTOSCALER_IMAGE
+cd ../third_party/kamatera 
+export K8S_VERSION=1.32  # change to match the cluster autoscaler branch you are working on
+export KAMATERA_API_CLIENT_ID=
+export KAMATERA_API_SECRET=
+export KTBCA_KEEP_CLUSTER=yes
+uv sync
+uv run pytest -svvx
+```
+
+Cleanup the cluster afterwards:
+
+```
+export KTBCA_NAME_PREFIX=
+uv run -m tests.setup destroy
+```
