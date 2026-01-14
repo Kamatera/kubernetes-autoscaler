@@ -28,10 +28,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"k8s.io/klog/v2"
 	"net/http"
 	"strings"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 var kamateraHTTPClient = &http.Client{Timeout: 5 * time.Minute}
@@ -52,16 +53,20 @@ func request(ctx context.Context, provider ProviderConfig, method string, path s
 	}
 	path = strings.TrimPrefix(path, "/")
 	isQueueRequest := strings.HasPrefix(path, "service/queue")
+	logLevel := klog.Level(2)
+	if isQueueRequest {
+		logLevel = klog.Level(4)
+	}
 	url := fmt.Sprintf("%s/%s", provider.ApiUrl, path)
 	var result interface{}
 	var err error
 	for attempt := 0; attempt < numRetries; attempt++ {
 		if !isQueueRequest {
-			klog.V(4).Infof("kamatera request: %s %s %s", method, url, buf.String())
+			klog.V(logLevel).Infof("kamatera request: %s %s %s", method, url, buf.String())
 		}
 		if attempt > 0 {
 			if !isQueueRequest {
-				klog.V(4).Infof("kamatera request retry %d", attempt)
+				klog.V(logLevel).Infof("kamatera request retry %d", attempt)
 			}
 			time.Sleep(time.Duration(secondsBetweenRetries<<attempt) * time.Second)
 		}
@@ -100,10 +105,10 @@ func request(ctx context.Context, provider ProviderConfig, method string, path s
 
 func waitCommand(ctx context.Context, provider ProviderConfig, commandID string, numRetries int, secondsBetweenRetries int) (command map[string]interface{}, err error) {
 	startTime := time.Now()
-	klog.V(4).Infof("Kamatera queue: started waiting for command %s", commandID)
+	klog.V(2).Infof("Kamatera queue: started waiting for command %s", commandID)
 	defer func() {
 		if err != nil {
-			klog.V(4).Infof("Kamatera queue: finished waiting for command %s after %s: %v", commandID, time.Since(startTime), err)
+			klog.V(2).Infof("Kamatera queue: finished waiting for command %s after %s: %v", commandID, time.Since(startTime), err)
 			return
 		}
 
@@ -111,7 +116,7 @@ func waitCommand(ctx context.Context, provider ProviderConfig, commandID string,
 		if status == "" {
 			status = "complete"
 		}
-		klog.V(4).Infof("Kamatera queue: finished waiting for command %s after %s (status=%s)", commandID, time.Since(startTime), status)
+		klog.V(2).Infof("Kamatera queue: finished waiting for command %s after %s (status=%s)", commandID, time.Since(startTime), status)
 	}()
 
 	time.Sleep(2 * time.Second)
@@ -157,13 +162,13 @@ func waitCommands(ctx context.Context, provider ProviderConfig, commandIds map[s
 	for _, commandID := range commandIds {
 		commandIDs = append(commandIDs, commandID)
 	}
-	klog.V(4).Infof("Kamatera queue: started waiting for %d commands: %v", len(commandIds), commandIDs)
+	klog.V(2).Infof("Kamatera queue: started waiting for %d commands: %v", len(commandIds), commandIDs)
 	defer func() {
 		if err != nil {
-			klog.V(4).Infof("Kamatera queue: finished waiting for %d commands after %s: %v", len(commandIds), time.Since(startTime), err)
+			klog.V(2).Infof("Kamatera queue: finished waiting for %d commands after %s: %v", len(commandIds), time.Since(startTime), err)
 			return
 		}
-		klog.V(4).Infof("Kamatera queue: finished waiting for %d commands after %s (status=complete)", len(commandIds), time.Since(startTime))
+		klog.V(2).Infof("Kamatera queue: finished waiting for %d commands after %s (status=complete)", len(commandIds), time.Since(startTime))
 	}()
 
 	time.Sleep(2 * time.Second)
