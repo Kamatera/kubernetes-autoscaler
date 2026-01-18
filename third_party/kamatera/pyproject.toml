@@ -3,11 +3,8 @@ name = "kamateraca"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "pytest==9.0.2",
-    "pytest-xdist==1.32.0",
-    "python-dotenv>=1.2.1",
-    "requests==2.32.3",
-    "ruamel-yaml==0.16.10",
-    "urllib3==2.2.3",
-    "watchdog==2.1.9",
+    "kamatera-rke2-kubernetes-terraform-example-tests",
 ]
+
+[tool.uv.sources]
+kamatera-rke2-kubernetes-terraform-example-tests = { path = "../../../kamatera-rke2-kubernetes-terraform-example/tests", editable = true }
