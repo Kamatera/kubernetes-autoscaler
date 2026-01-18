@@ -1,391 +1,227 @@
-import datetime
-import json
 import os
-import secrets
-import subprocess
 import time
-import traceback
+import base64
+import subprocess
+from textwrap import dedent
+import json
 
-import pytest
-import dotenv
+from ruamel.yaml import YAML
 
+from kamatera_rke2_kubernetes_terraform_example_tests import setup, util, destroy, k8s_demo_app
 
-dotenv.load_dotenv()
-
-
-NAME_PREFIX = os.environ.get("KTBCA_NAME_PREFIX")
-KEEP_CLUSTER = bool(NAME_PREFIX) or os.environ.get("KTBCA_KEEP_CLUSTER") == "yes"
-POLL_SECONDS = 15
-TIMEOUT_SECONDS = 60 * 30  # 30 minutes
-NODEGROUP_NAME = "autoscaler"
-NODEGROUP_MIN_SIZE = 1
-NODEGROUP_MAX_SIZE = 3
-NODEGROUP_CPU = "4B"
-NODEGROUP_RAM_MB = 8192
-NODEGROUP_DISK = "size=100"
-NODE_LABEL_KEY = "role"
-NODE_LABEL_VALUE = NODEGROUP_NAME
-NODE_LABEL_SELECTOR = f"{NODE_LABEL_KEY}={NODE_LABEL_VALUE}"
-WORKLOAD_REPLICAS = 3
+yaml = YAML(typ='safe', pure=True)
 
 
-def kubectl(kubeconfig_path, *args, input_text=None):
-    result = subprocess.run(
-        ["kubectl", "--kubeconfig", kubeconfig_path, *args],
-        input=input_text,
-        text=True,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    return result.stdout
+POWER_OFF_ON_SCALE_DOWN = os.getenv("POWER_OFF_ON_SCALE_DOWN") == "yes"
+POWER_ON_ON_SCALE_UP = os.getenv("POWER_ON_ON_SCALE_UP") == "yes"
 
 
-def get_autoscaler_data_dir():
-    return os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", ".data", "cluster_autoscaler")
-    )
-
-
-def find_kubeconfig_path(name_prefix=None):
-    data_dir = get_autoscaler_data_dir()
-    if not name_prefix:
-        name_prefix = NAME_PREFIX
-    if name_prefix:
-        kubeconfig_path = os.path.join(data_dir, name_prefix, "terraform", ".kubeconfig")
-        if os.path.exists(kubeconfig_path):
-            return kubeconfig_path
-        pytest.skip(f"kubeconfig not found at {kubeconfig_path}")
-    if not os.path.isdir(data_dir):
-        pytest.skip(f"cluster autoscaler data dir not found at {data_dir}")
-    kubeconfigs = []
-    for entry in os.listdir(data_dir):
-        candidate = os.path.join(data_dir, entry, "terraform", ".kubeconfig")
-        if os.path.exists(candidate):
-            kubeconfigs.append(candidate)
-    if not kubeconfigs:
-        pytest.skip("no kubeconfig files found under cluster autoscaler data dir")
-    return max(kubeconfigs, key=os.path.getmtime)
-
-
-def get_terraform_dir(name_prefix):
-    return os.path.join(get_autoscaler_data_dir(), name_prefix, "terraform")
-
-
-def build_namespace_name():
-    suffix = f"{datetime.datetime.now().strftime('%m%d%H%M%S')}{secrets.token_hex(2)}"
-    return f"ktbca-{suffix}"[:63]
-
-
-def build_name_prefix():
-    suffix = f"{datetime.datetime.now().strftime('%m%d')}{secrets.token_hex(2)}"
-    return f"kca{suffix}"
-
-
-def build_nodegroup_configs():
-    config_lines = [
-        f"min-size={NODEGROUP_MIN_SIZE}",
-        f"max-size={NODEGROUP_MAX_SIZE}",
-        f"cpu={NODEGROUP_CPU}",
-        f"ram={NODEGROUP_RAM_MB}",
-        f"disk={NODEGROUP_DISK}",
-        'template-label="kubernetes.io/os=linux"',
-        f'template-label="{NODE_LABEL_KEY}={NODE_LABEL_VALUE}"',
-    ]
-    return {NODEGROUP_NAME: "\n".join(config_lines)}
-
-
-def build_nodegroup_rke2_extra_config():
-    return {
-        NODEGROUP_NAME: f"""node-label:\n  - {NODE_LABEL_KEY}={NODE_LABEL_VALUE}\n"""
-    }
-
-
-def load_tfvars(path):
-    with open(path) as tfvars_file:
-        return json.load(tfvars_file)
-
-
-def write_tfvars(path, data):
-    with open(path, "w") as tfvars_file:
-        tfvars_file.write(json.dumps(data))
-
-
-def add_autoscaler_nodegroup(terraform_dir):
-    tfvars_path = os.path.join(terraform_dir, "02-k8s", "ktb.auto.tfvars.json")
-    tfvars = load_tfvars(tfvars_path)
-    tfvars["cluster_autoscaler_nodegroup_configs"] = build_nodegroup_configs()
-    tfvars["cluster_autoscaler_nodegroup_rke2_extra_config"] = (
-        build_nodegroup_rke2_extra_config()
-    )
-    write_tfvars(tfvars_path, tfvars)
-    subprocess.check_call(
-        ["terraform", "apply", "-auto-approve"],
-        cwd=os.path.join(terraform_dir, "02-k8s"),
+def get_k8s_tfvars():
+    return setup.K8STfvarsConfig(
+        ca_rbac_url='https://raw.githubusercontent.com/Kamatera/kubernetes-autoscaler/refs/heads/kamatera-cluster-autoscaler/cluster-autoscaler/cloudprovider/kamatera/examples/rbac.yaml',
+        ca_image='gcr.io/k8s-staging-autoscaling/cluster-autoscaler-amd64:dev',
+        ca_replicas=0,
+        ca_extra_args=[],
+        ca_nodegroup_configs={
+            "autoscaler": dedent('''
+                min-size = 1
+                max-size = 3
+                cpu = 2B
+                ram = 2048
+                disk = size=20
+                template-label = "kubernetes.io/os=linux"
+                template-label = "role=autoscaler"
+            '''),
+        },
+        ca_nodegroup_rke2_extra_config={
+            "autoscaler": dedent('''
+                node-label:
+                  - role=autoscaler
+            ''')
+        },
+        controller_replicas=0,
     )
 
 
-def wait_for_condition(description, condition, timeout_seconds=TIMEOUT_SECONDS, progress=None):
-    start_time = time.time()
-    print(f'waiting for condition: {description} (with timeout {timeout_seconds} seconds)')
-    print(f'start time: {datetime.datetime.now().isoformat()}')
-    i = 0
-    while True:
-        i += 1
-        if condition():
-            print(f'condition met: {description}')
-            print(f'end time: {datetime.datetime.now().isoformat()}')
-            if progress:
-                print(progress())
-            return
-        if time.time() - start_time > timeout_seconds:
-            if progress:
-                print(progress())
-            raise AssertionError(f"timeout waiting for {description}")
-        if i % 10 == 0 and progress:
-            print(progress())
-        time.sleep(POLL_SECONDS)
-
-
-def get_node_count(kubeconfig_path, label_selector=None):
-    args = ["get", "nodes"]
-    if label_selector:
-        args += ["-l", label_selector]
-    args += ["-o", "json"]
-    data = json.loads(kubectl(kubeconfig_path, *args))
-    total_nodes = 0
-    ready_nodes = 0
-    for node in data.get("items", []):
-        total_nodes += 1
-        for condition in node.get("status", {}).get("conditions", []):
-            if condition.get("type") == "Ready" and condition.get("status") == "True":
-                ready_nodes += 1
-                break
-    return total_nodes, ready_nodes
-
-
-def get_servers_count(name_prefix, power=None):
-    kamatera_api_client_id = os.getenv("KAMATERA_API_CLIENT_ID")
-    kamatera_api_secret = os.getenv("KAMATERA_API_SECRET")
-    try:
-        servers = json.loads(subprocess.check_output([
-            "cloudcli",
-            "--api-clientid", kamatera_api_client_id,
-            "--api-secret", kamatera_api_secret,
-            "server", "info",
-            "--name", f'{name_prefix}-autoscaler-.*',
-            "--format", "json",
-        ]))
-    except:
-        servers = []
-    if power:
-        servers = [s for s in servers if s.get("power") == power]
-    return len(servers)
-
-
-def get_pods(kubeconfig_path, namespace):
-    data = json.loads(
-        kubectl(kubeconfig_path, "get", "pods", "-n", namespace, "-o", "json")
-    )
-    return data.get("items", [])
-
-
-def pods_running(kubeconfig_path, namespace, expected_running_replicas):
-    pods = get_pods(kubeconfig_path, namespace)
-    running_replicas = 0
-    for pod in pods:
-        if pod.get("status", {}).get("phase") == "Running":
-            running_replicas += 1
-    return running_replicas == expected_running_replicas
-
-
-def no_pods_exist(kubeconfig_path, namespace):
-    return len(get_pods(kubeconfig_path, namespace)) == 0
-
-
-def apply_deployment(kubeconfig_path, namespace, replicas):
-    manifest = f"""
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: autoscaler-load
-  namespace: {namespace}
-spec:
-  replicas: {replicas}
-  selector:
-    matchLabels:
-      app: autoscaler-load
-  template:
-    metadata:
-      labels:
-        app: autoscaler-load
-    spec:
-      nodeSelector:
-        {NODE_LABEL_KEY}: {NODE_LABEL_VALUE}
-      containers:
-      - name: load
-        image: registry.k8s.io/pause:3.9
-        resources:
-          requests:
-            cpu: "3000m"
-            memory: "6000Mi"
-"""
-    kubectl(kubeconfig_path, "apply", "-f", "-", input_text=manifest)
-
-
-def scale_deployment(kubeconfig_path, namespace, replicas):
-    kubectl(
-        kubeconfig_path,
-        "scale",
-        "deployment/autoscaler-load",
-        "-n",
-        namespace,
-        "--replicas",
-        str(replicas),
-    )
-
-
-def delete_namespace(kubeconfig_path, namespace):
-    subprocess.run(
-        [
-            "kubectl",
-            "--kubeconfig",
-            kubeconfig_path,
-            "delete",
-            "namespace",
-            namespace,
-            "--wait=false",
-        ],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-
-@pytest.fixture()
-def autoscaler_cluster():
-    kamatera_api_client_id = os.getenv("KAMATERA_API_CLIENT_ID")
-    kamatera_api_secret = os.getenv("KAMATERA_API_SECRET")
-    name_prefix = NAME_PREFIX
-    if name_prefix:
-        kubeconfig_path = find_kubeconfig_path(name_prefix)
-        assert get_node_count(kubeconfig_path) == (1, 1)
-        yield name_prefix, kubeconfig_path
+def get_server_status(name):
+    res = destroy.cloudcli("server", "info", "--name", name, "--format", "json", run=True, capture_output=True)
+    if res.returncode == 0:
+        servers = json.loads(res.stdout)
+        assert len(servers) == 1
+        return "power_on" if servers[0]["power"] == "on" else "power_off"
+    elif 'No servers found' in res.stdout:
+        return "not_found"
     else:
-        from . import setup as autoscaler_setup
+        raise Exception(f"Failed to get server status\n{res.stdout}\n{res.stderr}")
 
-        name_prefix = autoscaler_setup.run_setup(
-            kamatera_api_client_id,
-            kamatera_api_secret,
-        )
-        try:
-            kubeconfig_path = find_kubeconfig_path(name_prefix)
-            wait_for_condition(
-                "cluster should have a single controlplane node",
-                lambda: get_node_count(kubeconfig_path) == (1, 1),
-                progress=lambda: kubectl(kubeconfig_path, "get", "nodes")
-            )
-            yield name_prefix, kubeconfig_path
-        except:
-            print(f'error occurred, keeping cluster with name prefix {name_prefix} for investigation')
-            traceback.print_exc()
-            print('scaling down autoscaler to freeze cluster state')
-            kubectl(kubeconfig_path, "scale", "deploy/cluster-autoscaler", "-n", "kube-system", "--replicas=0")
-            raise
+
+def test():
+    use_existing_name_prefix = os.getenv("USE_EXISTING_NAME_PREFIX")
+    name_prefix = use_existing_name_prefix or setup.generate_name_prefix()
+    print(f'name_prefix="{name_prefix}"')
+    k8s_version = os.getenv("K8S_VERSION") or "1.35"
+    datacenter_id = "US-NY2"
+    with_bastion = False
+    keep_cluster = os.getenv("KEEP_CLUSTER") == "yes"
+    ca_p = None
+    try:
+        if use_existing_name_prefix:
+            util.kubectl("delete", "namespace", "demo", "--ignore-not-found", "--wait")
+            destroy.cloudcli("server", "terminate", "--force", "--name", f"{name_prefix}-autoscaler-.*", "--wait", run=True)
+            util.kubectl("delete", "nodes", "-l", "role=autoscaler", "--wait")
         else:
-            if KEEP_CLUSTER:
-                print(f"Keeping cluster with name prefix {name_prefix}")
-            else:
-                subprocess.call([
-                    "kubectl", "-n", "kube-system", "logs", "deploy/cluster-autoscaler"
-                ], env={
-                    **os.environ,
-                    "KUBECONFIG": kubeconfig_path,
-                })
-                autoscaler_setup.destroy(name_prefix)
-
-
-def test_autoscaler_scale_up_down(autoscaler_cluster):
-    name_prefix, kubeconfig_path = autoscaler_cluster
-    print("Using cluster with name prefix:", name_prefix)
-    print("Using kubeconfig path:", kubeconfig_path)
-    subprocess.check_call(["cat", kubeconfig_path])
-    terraform_dir = get_terraform_dir(name_prefix)
-    namespace = "ktbca-autoscaler-up-down"
-    kubectl(kubeconfig_path, "create", "namespace", namespace)
-    wait_for_condition(
-        "autoscaler baseline - single node",
-        lambda: get_node_count(kubeconfig_path) == (1,1),
-        progress=lambda: kubectl(kubeconfig_path, "get", "nodes")
-    )
-    add_autoscaler_nodegroup(terraform_dir)
-    apply_deployment(kubeconfig_path, namespace, replicas=1)
-    wait_for_condition(
-        "1 pod to be running",
-        lambda: pods_running(
-            kubeconfig_path, namespace, expected_running_replicas=1
-        ),
-        progress=lambda: kubectl(kubeconfig_path, "get", "pods", "-n", namespace)
-    )
-    wait_for_condition(
-        "1 server powered on",
-        lambda: get_servers_count(name_prefix, power="on") == 1,
-    )
-    wait_for_condition(
-        "1 autoscaler node ready",
-        lambda: get_node_count(kubeconfig_path, NODE_LABEL_SELECTOR) == (1,1),
-        progress=lambda: kubectl(kubeconfig_path, "get", "nodes")
-    )
-    apply_deployment(kubeconfig_path, namespace, replicas=4)
-    for i in range(10):
-        print(f"Waiting 1 minute before ensuring again that scale up is stable (attempt {i+1}/10)")
-        time.sleep(60)
-        wait_for_condition(
-            "3 pods to be running",
-            lambda: pods_running(
-                kubeconfig_path, namespace, expected_running_replicas=3
-            ),
-            progress=lambda: kubectl(kubeconfig_path, "get", "pods", "-n", namespace)
+            setup.main(
+                name_prefix=name_prefix,
+                k8s_version=k8s_version,
+                datacenter_id=datacenter_id,
+                with_bastion=with_bastion,
+                k8s_tfvars_config=get_k8s_tfvars()
+            )
+        util.wait_for(
+            "deployment of demo_app",
+            lambda: util.kubectl("apply", "-f", "demo_app.yaml", cwd=os.path.dirname(__file__)) or True,
+            retry_on_exception=True
         )
-        wait_for_condition(
-            "3 servers powered on",
-            lambda: get_servers_count(name_prefix, power="on") == 3,
+        util.wait_for(
+            "2 pods total but none running (no autoscaler yet)",
+            lambda: util.kubectl_pods_count("demo") == (2,0),
+            progress=lambda: util.kubectl("get", "pods", "-n", "demo")
         )
-        wait_for_condition(
-            "3 autoscaler nodes ready",
-            lambda: get_node_count(kubeconfig_path, NODE_LABEL_SELECTOR) == (3, 3),
-            progress=lambda: kubectl(kubeconfig_path, "get", "nodes")
+        util.kubectl(
+            "apply", "-f", "rbac.yaml",
+            cwd=os.path.join(os.path.dirname(__file__), '..', '..', '..', 'cluster-autoscaler', 'cloudprovider', 'kamatera', 'examples')
         )
-    scale_deployment(kubeconfig_path, namespace, replicas=2)
-    wait_for_condition(
-        "2 pods to be running",
-        lambda: pods_running(
-            kubeconfig_path, namespace, expected_running_replicas=2
-        ),
-        progress=lambda: kubectl(kubeconfig_path, "get", "pods", "-n", namespace)
-    )
-    wait_for_condition(
-        "2 servers",
-        lambda: get_servers_count(name_prefix) == 2,
-    )
-    # currently nodes are stopped but not removed from the cluster
-    # wait_for_condition(
-    #     "node count down to 2",
-    #     lambda: get_node_count(kubeconfig_path, NODE_LABEL_SELECTOR) == (2,2),
-    # )
-    scale_deployment(kubeconfig_path, namespace, replicas=0)
-    wait_for_condition(
-        "no pods",
-        lambda: no_pods_exist(kubeconfig_path, namespace),
-        progress=lambda: kubectl(kubeconfig_path, "get", "pods", "-n", namespace)
-    )
-    wait_for_condition(
-        "1 server",
-        lambda: get_servers_count(name_prefix) == 1,
-    )
-    # currently nodes are stopped but not removed from the cluster
-    # wait_for_condition(
-    #     "node count down to 1",
-    #     lambda: get_node_count(kubeconfig_path, NODE_LABEL_SELECTOR) == (1,1),
-    # )
+        token = util.kubectl(
+            "create", "token", "cluster-autoscaler", "-n", "kube-system", "--duration", "24h", parse_json=True
+        )["status"]["token"]
+        with open(util.get_kubeconfig()) as f:
+            kubeconfig = yaml.load(f)
+        kubeconfig["users"] = [
+            {
+                "name": "cluster-autoscaler",
+                "user": {
+                    "token": token
+                }
+            }
+        ]
+        kubeconfig["contexts"][0]["context"]["user"] = "cluster-autoscaler"
+        ca_kubeconfig = os.path.join(os.path.dirname(__file__), ".kubeconfig")
+        with open(ca_kubeconfig, "w") as f:
+            yaml.dump(kubeconfig, f)
+        cloudconfig = base64.b64decode(util.kubectl("get", "secret", "-n", "kube-system", "cluster-autoscaler-kamatera", parse_json=True)["data"]["cloud-config"]).decode()
+        global_configs = []
+        if POWER_OFF_ON_SCALE_DOWN:
+            global_configs.append("poweroff-on-scale-down = true")
+        if POWER_ON_ON_SCALE_UP:
+            global_configs.append("poweron-on-scale-up = true")
+        cloudconfig = cloudconfig.replace("[global]", "[global]\n" + "\n".join(global_configs))
+        with open(os.path.join(os.path.dirname(__file__), ".cloud-config"), "w") as f:
+            f.write(cloudconfig)
+        ca_args = [
+            "../../../cluster-autoscaler/cluster-autoscaler-amd64",
+            "--cloud-provider", "kamatera",
+            "--cloud-config", "./.cloud-config",
+            "--v", "2",
+            "--logtostderr",
+            "--namespace", "kube-system",
+            "--kubeconfig", ca_kubeconfig,
+            "--cordon-node-before-terminating",
+            # we set low thresholds for faster testing
+            "--scale-down-unneeded-time=5m",
+            "--initial-node-group-backoff-duration=2m",
+            "--max-node-group-backoff-duration=3m",
+            "--node-group-backoff-reset-timeout=6m",
+            "--provisioning-request-max-backoff-time=6m",
+            "--scale-down-delay-after-add=2m",
+            "--scale-down-delay-after-failure=2m",
+            "--scale-down-unready-time=5m",
+        ]
+        print("Starting cluster-autoscaler:", " ".join(ca_args))
+        ca_p = subprocess.Popen(
+            ca_args, cwd=os.path.dirname(__file__),
+            # stderr=subprocess.STDOUT, stdout=subprocess.PIPE
+        )
+        util.wait_for(
+            f"3 nodes to be ready",
+            lambda: util.kubectl_node_count() == (3, 3),
+            progress=lambda: util.kubectl("get", "nodes"),
+            retry_on_exception=True
+        )
+        node_names = {node["metadata"]["name"] for node in util.kubectl("get", "nodes", parse_json=True)["items"]}
+        node_names.remove("controlplane1")
+        assert len(node_names) == 2 and all(name.startswith(f"{name_prefix}-autoscaler-") for name in node_names), node_names
+        util.wait_for(
+            "2 pods total and running (after autoscaler adds nodes)",
+            lambda: util.kubectl_pods_count("demo") == (2, 2),
+            progress=lambda: util.kubectl("get", "pods", "-n", "demo")
+        )
+        pods = util.kubectl("get", "pods", "-n", "demo", parse_json=True)["items"]
+        assert len(pods) == 2 and all(pod["spec"]["nodeName"].startswith(f"{name_prefix}-autoscaler-") for pod in pods), pods
+        k8s_demo_app.ensure_stability(
+            (3, 3),
+            (2, 2)
+        )
+        util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=0")
+        util.wait_for(
+            "all demo pods terminated",
+            lambda: util.kubectl_pods_count("demo") == (0, 0),
+            progress=lambda: util.kubectl("get", "pods", "-n", "demo")
+        )
+        util.wait_for(
+            f"3 total nodes, 2 ready nodes (after autoscaler removes unneeded nodes)",
+            lambda: util.kubectl_node_count() == (3, 2),
+            progress=lambda: util.kubectl("get", "nodes"),
+        )
+        notready_node_names = []
+        for node in util.kubectl("get", "nodes", parse_json=True)["items"]:
+            for condition in node.get("status", {}).get("conditions", []):
+                if condition.get("type") == "Ready" and condition.get("status") != "True":
+                    notready_node_names.append(node["metadata"]["name"])
+        assert len(notready_node_names) == 1
+        scaled_down_node_name = notready_node_names[0]
+        expected_status = "power_off" if POWER_OFF_ON_SCALE_DOWN else "not_found"
+        util.wait_for(
+            f'scaled down node to be {expected_status}',
+            lambda: get_server_status(scaled_down_node_name) == expected_status,
+        )
+        util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=2")
+        util.wait_for(
+            "2 pods total and running (after autoscaler scales back up)",
+            lambda: util.kubectl_pods_count("demo") == (2, 2),
+            progress=lambda: util.kubectl("get", "pods", "-n", "demo"),
+        )
+        if POWER_ON_ON_SCALE_UP and POWER_OFF_ON_SCALE_DOWN:
+            util.wait_for(
+                f"3 nodes total and 3 ready (after autoscaler powers on node)",
+                lambda: util.kubectl_node_count() == (3, 3),
+                progress=lambda: util.kubectl("get", "nodes"),
+            )
+            k8s_demo_app.ensure_stability((3, 3), (2, 2))
+        else:
+            util.wait_for(
+                f"4 nodes total and 3 ready (after autoscaler creates a new node)",
+                lambda: util.kubectl_node_count() == (4, 3),
+                progress=lambda: util.kubectl("get", "nodes"),
+            )
+            k8s_demo_app.ensure_stability((4, 3), (2, 2))
+    except:
+        if ca_p:
+            ca_p.terminate()
+            ca_p.wait()
+            # for line in ca_p.stdout:
+            #     print(line.decode().rstrip())
+        util.kubectl("get", "nodes")
+        util.kubectl("get", "pods", "-n", "demo")
+        print(f'name_prefix="{name_prefix}"')
+        raise
+    else:
+        if ca_p:
+            ca_p.terminate()
+            ca_p.wait()
+        if keep_cluster:
+            print(f'name_prefix="{name_prefix}"')
+        else:
+            destroy.main(
+                name_prefix=name_prefix,
+                datacenter_id=datacenter_id,
+            )
