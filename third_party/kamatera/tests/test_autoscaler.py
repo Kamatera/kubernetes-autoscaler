@@ -1,9 +1,9 @@
 import os
-import time
 import base64
 import subprocess
 from textwrap import dedent
 import json
+import contextlib
 
 from ruamel.yaml import YAML
 
@@ -53,6 +53,21 @@ def get_server_status(name):
         return "not_found"
     else:
         raise Exception(f"Failed to get server status\n{res.stdout}\n{res.stderr}")
+
+
+@contextlib.contextmanager
+def print_wrapper():
+    print('~'*30)
+    try:
+        yield
+    finally:
+        print('~'*30)
+
+
+def print_function(*args):
+    txt = " ".join(str(a) for a in args)
+    for line in txt.splitlines():
+        print(f"~~~~~ {line}")
 
 
 def test():
@@ -121,7 +136,7 @@ def test():
             "../../../cluster-autoscaler/cluster-autoscaler-amd64",
             "--cloud-provider", "kamatera",
             "--cloud-config", "./.cloud-config",
-            "--v", "2",
+            "--v", "4",
             "--logtostderr",
             "--namespace", "kube-system",
             "--kubeconfig", ca_kubeconfig,
@@ -139,35 +154,46 @@ def test():
         print("Starting cluster-autoscaler:", " ".join(ca_args))
         ca_p = subprocess.Popen(
             ca_args, cwd=os.path.dirname(__file__),
-            # stderr=subprocess.STDOUT, stdout=subprocess.PIPE
         )
-        util.wait_for(
+
+        # from this point onwards we need to clearly isolate prints so they stand out from the CA logs
+        def wait_for(*args, **kwargs):
+            with print_wrapper():
+                return util.wait_for(*args, print_function=print_function, **kwargs)
+
+        def ensure_stability(*args, **kwargs):
+            with print_wrapper():
+                return k8s_demo_app.ensure_stability(*args, print_function=print_function, **kwargs)
+
+        wait_for(
             f"3 nodes to be ready",
             lambda: util.kubectl_node_count() == (3, 3),
             progress=lambda: util.kubectl("get", "nodes"),
-            retry_on_exception=True
+            retry_on_exception=True,
+            timeout_seconds=3600,  # servers may take a while to create
         )
         node_names = {node["metadata"]["name"] for node in util.kubectl("get", "nodes", parse_json=True)["items"]}
         node_names.remove("controlplane1")
         assert len(node_names) == 2 and all(name.startswith(f"{name_prefix}-autoscaler-") for name in node_names), node_names
-        util.wait_for(
+        wait_for(
             "2 pods total and running (after autoscaler adds nodes)",
             lambda: util.kubectl_pods_count("demo") == (2, 2),
-            progress=lambda: util.kubectl("get", "pods", "-n", "demo")
+            progress=lambda: util.kubectl("get", "pods", "-n", "demo"),
         )
         pods = util.kubectl("get", "pods", "-n", "demo", parse_json=True)["items"]
         assert len(pods) == 2 and all(pod["spec"]["nodeName"].startswith(f"{name_prefix}-autoscaler-") for pod in pods), pods
-        k8s_demo_app.ensure_stability(
+        ensure_stability(
             (3, 3),
             (2, 2)
         )
-        util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=0")
-        util.wait_for(
+        with print_wrapper():
+            util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=0")
+        wait_for(
             "all demo pods terminated",
             lambda: util.kubectl_pods_count("demo") == (0, 0),
-            progress=lambda: util.kubectl("get", "pods", "-n", "demo")
+            progress=lambda: util.kubectl("get", "pods", "-n", "demo"),
         )
-        util.wait_for(
+        wait_for(
             f"3 total nodes, 2 ready nodes (after autoscaler removes unneeded nodes)",
             lambda: util.kubectl_node_count() == (3, 2),
             progress=lambda: util.kubectl("get", "nodes"),
@@ -180,36 +206,42 @@ def test():
         assert len(notready_node_names) == 1
         scaled_down_node_name = notready_node_names[0]
         expected_status = "power_off" if POWER_OFF_ON_SCALE_DOWN else "not_found"
-        util.wait_for(
+        wait_for(
             f'scaled down node to be {expected_status}',
             lambda: get_server_status(scaled_down_node_name) == expected_status,
         )
-        util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=2")
-        util.wait_for(
+        with print_wrapper():
+            util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=2")
+        if POWER_ON_ON_SCALE_UP and POWER_OFF_ON_SCALE_DOWN:
+            expected_nodes = (3, 3)
+            wait_for(
+                f"3 nodes total and 3 ready (after autoscaler powers on node)",
+                lambda: util.kubectl_node_count() == expected_nodes,
+                progress=lambda: util.kubectl("get", "nodes"),
+            )
+        else:
+            expected_nodes = (4, 3)
+            wait_for(
+                f"4 nodes total and 3 ready (after autoscaler creates a new node)",
+                lambda: util.kubectl_node_count() == expected_nodes,
+                progress=lambda: util.kubectl("get", "nodes"),
+                timeout_seconds=3600,  # servers may take a while to create
+            )
+        wait_for(
             "2 pods total and running (after autoscaler scales back up)",
             lambda: util.kubectl_pods_count("demo") == (2, 2),
             progress=lambda: util.kubectl("get", "pods", "-n", "demo"),
         )
-        if POWER_ON_ON_SCALE_UP and POWER_OFF_ON_SCALE_DOWN:
-            util.wait_for(
-                f"3 nodes total and 3 ready (after autoscaler powers on node)",
-                lambda: util.kubectl_node_count() == (3, 3),
-                progress=lambda: util.kubectl("get", "nodes"),
-            )
-            k8s_demo_app.ensure_stability((3, 3), (2, 2))
-        else:
-            util.wait_for(
-                f"4 nodes total and 3 ready (after autoscaler creates a new node)",
-                lambda: util.kubectl_node_count() == (4, 3),
-                progress=lambda: util.kubectl("get", "nodes"),
-            )
-            k8s_demo_app.ensure_stability((4, 3), (2, 2))
+        ensure_stability(expected_nodes, (2, 2))
+        with print_wrapper():
+            print_function("Autoscaler Test Completed Successfully")
     except:
         if ca_p:
             ca_p.terminate()
             ca_p.wait()
-            # for line in ca_p.stdout:
-            #     print(line.decode().rstrip())
+            if ca_p.stdout:
+                for line in ca_p.stdout:
+                    print(line.decode().rstrip())
         util.kubectl("get", "nodes")
         util.kubectl("get", "pods", "-n", "demo")
         print(f'name_prefix="{name_prefix}"')
