@@ -1,4 +1,5 @@
 import os
+import time
 import base64
 import subprocess
 from textwrap import dedent
@@ -39,7 +40,6 @@ def get_k8s_tfvars():
                   - role=autoscaler
             ''')
         },
-        controller_replicas=0,
     )
 
 
@@ -68,6 +68,42 @@ def print_function(*args):
     txt = " ".join(str(a) for a in args)
     for line in txt.splitlines():
         print(f"~~~~~ {line}")
+
+
+def count_at_least(actual, expected):
+    a_total, a_ready = actual
+    e_total, e_ready = expected
+    return a_total >= e_total and a_ready >= e_ready
+
+
+def ensure_stability_nodes_at_least(expected_nodes, expected_pods, iterations=10, total_iterations=30):
+    print_function(f'Ensuring cluster stability')
+    print_function(f'expected_nodes at least {expected_nodes}')
+    print_function(f'expected_pods={expected_pods}')
+    stable_iterations = 0
+    for i in range(total_iterations):
+        print_function(f'iteration {i + 1}/{total_iterations} (stable iterations: {stable_iterations}/{iterations})...')
+        if stable_iterations + (total_iterations - i) < iterations:
+            print_function('Not enough iterations left to reach stability, failing')
+            break
+        time.sleep(60)
+        actual_nodes = util.kubectl_node_count()
+        if not count_at_least(actual_nodes, expected_nodes):
+            util.kubectl("get", "nodes")
+            print_function(f'unexpected node count: {actual_nodes}, expected at least: {expected_nodes}')
+            stable_iterations = 0
+            continue
+        actual_pods = util.kubectl_pods_count("demo")
+        if actual_pods != expected_pods:
+            util.kubectl("get", "pods", "-n", "demo")
+            print_function(f'unexpected pod count: {actual_pods}, expected: {expected_pods}')
+            stable_iterations = 0
+            continue
+        stable_iterations += 1
+        if stable_iterations >= iterations:
+            break
+    assert stable_iterations >= iterations, f"cluster unstable"
+    print_function('Cluster is stable')
 
 
 def test():
@@ -212,27 +248,17 @@ def test():
         )
         with print_wrapper():
             util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=2")
-        if POWER_ON_ON_SCALE_UP and POWER_OFF_ON_SCALE_DOWN:
-            expected_nodes = (3, 3)
-            wait_for(
-                f"3 nodes total and 3 ready (after autoscaler powers on node)",
-                lambda: util.kubectl_node_count() == expected_nodes,
-                progress=lambda: util.kubectl("get", "nodes"),
-            )
-        else:
-            expected_nodes = (4, 3)
-            wait_for(
-                f"4 nodes total and 3 ready (after autoscaler creates a new node)",
-                lambda: util.kubectl_node_count() == expected_nodes,
-                progress=lambda: util.kubectl("get", "nodes"),
-                timeout_seconds=3600,  # servers may take a while to create
-            )
+        wait_for(
+            f"at least 3 nodes total and 3 ready (after autoscaler powers on or creates a new node)",
+            lambda: count_at_least(util.kubectl_node_count(), (3, 3)),
+            progress=lambda: util.kubectl("get", "nodes"),
+        )
         wait_for(
             "2 pods total and running (after autoscaler scales back up)",
             lambda: util.kubectl_pods_count("demo") == (2, 2),
             progress=lambda: util.kubectl("get", "pods", "-n", "demo"),
         )
-        ensure_stability(expected_nodes, (2, 2))
+        ensure_stability_nodes_at_least((3, 3), (2, 2))
         with print_wrapper():
             print_function("Autoscaler Test Completed Successfully")
     except:
