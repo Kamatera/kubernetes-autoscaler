@@ -38,13 +38,16 @@ import (
 // configuration info and functions to control a set of nodes that have the
 // same capacity and set of labels.
 type NodeGroup struct {
-	id             string
-	manager        *manager
-	minSize        int
-	maxSize        int
-	instances      map[string]*Instance // key is the cloud provider ID
-	serverConfig   ServerConfig
-	templateLabels []string
+	id                            string
+	manager                       *manager
+	minSize                       int
+	maxSize                       int
+	poweroffOnScaleDown           bool
+	poweroffOnScaleDownMaxServers int
+	poweronOnScaleUp              bool
+	instances                     map[string]*Instance // key is the cloud provider ID
+	serverConfig                  ServerConfig
+	templateLabels                []string
 }
 
 var _ cloudprovider.NodeGroup = (*NodeGroup)(nil)
@@ -108,6 +111,12 @@ func (n *NodeGroup) AtomicIncreaseSize(delta int) error {
 // should wait until node group size is updated. Implementation required.
 func (n *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 	klog.V(2).Infof("Deleting %d nodes from node group %s", len(nodes), n.id)
+	numPoweredOffInstances := 0
+	for _, instance := range n.instances {
+		if !instance.PowerOn || instance.StatusCommandCode == InstanceCommandPoweroff {
+			numPoweredOffInstances++
+		}
+	}
 	for _, node := range nodes {
 		instance, err := n.findInstanceForNode(node)
 		if err != nil {
@@ -117,10 +126,14 @@ func (n *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 			return fmt.Errorf("Failed to delete node %q with provider ID %q: cannot find this node in the node group",
 				node.Name, node.Spec.ProviderID)
 		}
-		err = instance.delete(n.manager.client, n.manager.config.providerIDPrefix, n.manager.config.PoweroffOnScaleDown)
+		powerOffOnScaleDown := n.poweroffOnScaleDown && (n.poweroffOnScaleDownMaxServers == 0 || numPoweredOffInstances < n.poweroffOnScaleDownMaxServers)
+		err = instance.delete(n.manager.client, n.manager.config.providerIDPrefix, powerOffOnScaleDown)
 		if err != nil {
 			return fmt.Errorf("Failed to delete node %q with provider ID %q: %v",
 				node.Name, node.Spec.ProviderID, err)
+		}
+		if !instance.PowerOn || instance.StatusCommandCode == InstanceCommandPoweroff {
+			numPoweredOffInstances++
 		}
 	}
 	return nil
@@ -269,7 +282,7 @@ func (n *NodeGroup) findInstanceForNode(node *apiv1.Node) (*Instance, error) {
 }
 
 func (n *NodeGroup) createInstances(count int) error {
-	if n.manager.config.PoweronOnScaleUp {
+	if n.poweronOnScaleUp {
 		var poweronCandidateInstances []*Instance
 		for _, instance := range n.manager.snapshotInstances() {
 			if sets.New(n.serverConfig.Tags...).Equal(sets.New(instance.Tags...)) && instance.PowerOn == false && instance.Status == nil {

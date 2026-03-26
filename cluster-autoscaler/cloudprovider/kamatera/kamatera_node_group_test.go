@@ -144,16 +144,28 @@ func TestNodeGroup_IncreaseSize(t *testing.T) {
 
 func TestNodeGroup_IncreaseSize_withPoweredOffServers(t *testing.T) {
 	tests := []struct {
-		name             string
-		poweronOnScaleUp bool
+		name                      string
+		globalPoweronOnScaleUp    bool
+		nodeGroupPoweronOnScaleUp bool
+		expectPoweron             bool
 	}{
 		{
-			name:             "default",
-			poweronOnScaleUp: false,
+			name:                      "default",
+			globalPoweronOnScaleUp:    false,
+			nodeGroupPoweronOnScaleUp: false,
+			expectPoweron:             false,
 		},
 		{
-			name:             "poweron on scale up",
-			poweronOnScaleUp: true,
+			name:                      "node group override enables poweron",
+			globalPoweronOnScaleUp:    false,
+			nodeGroupPoweronOnScaleUp: true,
+			expectPoweron:             true,
+		},
+		{
+			name:                      "node group override disables poweron",
+			globalPoweronOnScaleUp:    true,
+			nodeGroupPoweronOnScaleUp: false,
+			expectPoweron:             false,
 		},
 	}
 	for _, tt := range tests {
@@ -187,7 +199,7 @@ func TestNodeGroup_IncreaseSize_withPoweredOffServers(t *testing.T) {
 				},
 				config: &kamateraConfig{
 					providerIDPrefix: "rke2://",
-					PoweronOnScaleUp: tt.poweronOnScaleUp,
+					PoweronOnScaleUp: tt.globalPoweronOnScaleUp,
 				},
 			}
 			serverName1 := mockKamateraServerName()
@@ -219,12 +231,13 @@ func TestNodeGroup_IncreaseSize_withPoweredOffServers(t *testing.T) {
 						PowerOn: true,
 					},
 				},
-				serverConfig: serverConfig,
+				poweronOnScaleUp: tt.nodeGroupPoweronOnScaleUp,
+				serverConfig:     serverConfig,
 			}
 
 			// test ok to add a node
 			createdServerName1 := mockKamateraServerName()
-			if tt.poweronOnScaleUp {
+			if tt.expectPoweron {
 				client.On(
 					"StartServerRequest", ctx, ServerRequestPoweron, PoweredOffServerName1,
 				).Return(
@@ -241,7 +254,7 @@ func TestNodeGroup_IncreaseSize_withPoweredOffServers(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, 4, len(ng.instances))
 
-			if tt.poweronOnScaleUp {
+			if tt.expectPoweron {
 				ng.instances[PoweredOffServerProviderID1].Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
 			} else {
 				ng.instances[formatKamateraProviderID("rke2://", createdServerName1)].Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
@@ -250,7 +263,7 @@ func TestNodeGroup_IncreaseSize_withPoweredOffServers(t *testing.T) {
 			// test ok to add multiple nodes
 			mgr.instances[PoweredOffServerProviderID3].Tags = []string{"tag1", "tag2"}
 			createdServerName2 := mockKamateraServerName()
-			if tt.poweronOnScaleUp {
+			if tt.expectPoweron {
 				client.On(
 					"StartCreateServers", ctx, 1, serverConfig,
 				).Return(
@@ -272,7 +285,7 @@ func TestNodeGroup_IncreaseSize_withPoweredOffServers(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, 6, len(ng.instances))
 
-			if tt.poweronOnScaleUp {
+			if tt.expectPoweron {
 				ng.instances[formatKamateraProviderID("rke2://", createdServerName2)].Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
 				ng.instances[formatKamateraProviderID("rke2://", PoweredOffServerName3)].Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
 			}
@@ -336,9 +349,10 @@ func TestNodeGroup_DeleteNodes(t *testing.T) {
 			serverName6 := mockKamateraServerName()
 			serverProviderID6 := formatKamateraProviderID("rke2://", serverName6)
 			ng := NodeGroup{
-				id:      "ng1",
-				minSize: 1,
-				maxSize: 6,
+				id:                  "ng1",
+				minSize:             1,
+				maxSize:             6,
+				poweroffOnScaleDown: tt.poweroffOnScaleDown,
 				instances: map[string]*Instance{
 					serverProviderID1: {Id: serverProviderID1, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}, PowerOn: true},
 					serverProviderID2: {Id: serverProviderID2, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}, PowerOn: true},
@@ -390,6 +404,114 @@ func TestNodeGroup_DeleteNodes(t *testing.T) {
 			})
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "error on API call")
+		})
+	}
+}
+
+func TestNodeGroup_DeleteNodes_PoweroffBehavior(t *testing.T) {
+	tests := []struct {
+		name                         string
+		globalPoweroffOnScaleDown    bool
+		nodeGroupPoweroffOnScaleDown bool
+		maxPoweredOffServers         int
+		existingPoweredOffServers    int
+		expectTerminate              bool
+	}{
+		{
+			name:                         "node group override enables poweroff",
+			globalPoweroffOnScaleDown:    false,
+			nodeGroupPoweroffOnScaleDown: true,
+			maxPoweredOffServers:         0,
+			existingPoweredOffServers:    0,
+			expectTerminate:              false,
+		},
+		{
+			name:                         "node group override disables poweroff",
+			globalPoweroffOnScaleDown:    true,
+			nodeGroupPoweroffOnScaleDown: false,
+			maxPoweredOffServers:         0,
+			existingPoweredOffServers:    0,
+			expectTerminate:              true,
+		},
+		{
+			name:                         "max powered off servers forces terminate",
+			globalPoweroffOnScaleDown:    true,
+			nodeGroupPoweroffOnScaleDown: true,
+			maxPoweredOffServers:         1,
+			existingPoweredOffServers:    1,
+			expectTerminate:              true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := kamateraClientMock{}
+			ctx := context.Background()
+			providerIDPrefix := "rke2://"
+			serverName := mockKamateraServerName()
+			serverProviderID := formatKamateraProviderID(providerIDPrefix, serverName)
+
+			instances := map[string]*Instance{
+				serverProviderID: {Id: serverProviderID, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}, PowerOn: true},
+			}
+			for i := 0; i < tt.existingPoweredOffServers; i++ {
+				existingServerName := mockKamateraServerName()
+				existingProviderID := formatKamateraProviderID(providerIDPrefix, existingServerName)
+				instances[existingProviderID] = &Instance{Id: existingProviderID, PowerOn: false}
+			}
+
+			mgr := manager{
+				client: &client,
+				config: &kamateraConfig{
+					providerIDPrefix:    providerIDPrefix,
+					PoweroffOnScaleDown: tt.globalPoweroffOnScaleDown,
+				},
+			}
+			ng := NodeGroup{
+				id:                            "ng1",
+				manager:                       &mgr,
+				poweroffOnScaleDown:           tt.nodeGroupPoweroffOnScaleDown,
+				poweroffOnScaleDownMaxServers: tt.maxPoweredOffServers,
+				instances:                     instances,
+			}
+
+			client.On(
+				"StartServerRequest", ctx, ServerRequestPoweroff, serverName,
+			).Return("cmd-poweroff", nil).Once()
+
+			err := ng.DeleteNodes([]*apiv1.Node{{Spec: apiv1.NodeSpec{ProviderID: serverProviderID}}})
+			assert.NoError(t, err)
+
+			instance := ng.instances[serverProviderID]
+			instance.PowerOn = false
+			client.On("getCommandStatus", ctx, "cmd-poweroff").Return(CommandStatusComplete, nil).Once()
+			if tt.expectTerminate {
+				client.On("StartServerTerminate", ctx, serverName, true).Return("cmd-terminate", nil).Once()
+			}
+
+			needToDelete, needToHandleScaleDown := instance.refresh(&client, providerIDPrefix, true)
+			assert.False(t, needToDelete)
+			assert.True(t, needToHandleScaleDown)
+			keptPoweredOff := instance.handleScaleDown(
+				tt.nodeGroupPoweroffOnScaleDown,
+				tt.maxPoweredOffServers,
+				tt.existingPoweredOffServers,
+				nil,
+				&client,
+				providerIDPrefix,
+			)
+			if tt.expectTerminate {
+				assert.False(t, keptPoweredOff)
+				assert.NotNil(t, instance.Status)
+				assert.Equal(t, cloudprovider.InstanceDeleting, instance.Status.State)
+				assert.Equal(t, "cmd-terminate", instance.StatusCommandId)
+				assert.Equal(t, InstanceCommandTerminate, instance.StatusCommandCode)
+			} else {
+				assert.True(t, keptPoweredOff)
+				assert.Nil(t, instance.Status)
+				assert.Equal(t, "", instance.StatusCommandId)
+				assert.Equal(t, InstanceCommandNone, instance.StatusCommandCode)
+			}
 		})
 	}
 }
