@@ -2,6 +2,7 @@ on:
   push:
     branches:
       - kamatera-cluster-autoscaler-*
+      - kamatera-cluster-autoscaler
     paths:
       - .github/workflows/ca-kamatera.yaml
       - third_party/kamatera/**
@@ -93,5 +94,6 @@ jobs:
           tags: |
             ghcr.io/kamatera/kubernetes-autoscaler:${{ github.sha }}
             ${{ startsWith(github.ref, 'refs/heads/kamatera-cluster-autoscaler') && format('ghcr.io/kamatera/kubernetes-autoscaler:{0}', github.ref_name) || '' }}
+            ${{ startsWith(github.ref, 'refs/heads/kamatera-cluster-autoscaler') && format('ghcr.io/kamatera/kubernetes-autoscaler:{0}-{1}', github.ref_name, github.sha) || '' }}
           cache-from: type=registry,ref=ghcr.io/kamatera/kubernetes-autoscaler:{{ github.ref_name }}
           cache-to: type=inline
