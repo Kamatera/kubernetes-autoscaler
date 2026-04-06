@@ -15,7 +15,7 @@ yaml = YAML(typ='safe', pure=True)
 
 POWER_OFF_ON_SCALE_DOWN = os.getenv("POWER_OFF_ON_SCALE_DOWN") == "yes"
 POWER_ON_ON_SCALE_UP = os.getenv("POWER_ON_ON_SCALE_UP") == "yes"
-
+TEST_AUTOSCALER_CONFIG = json.loads(os.getenv("TEST_AUTOSCALER_CONFIG_JSON") or "{}")
 
 def get_k8s_tfvars():
     return setup.K8STfvarsConfig(
@@ -161,11 +161,20 @@ def test():
             yaml.dump(kubeconfig, f)
         cloudconfig = base64.b64decode(util.kubectl("get", "secret", "-n", "kube-system", "cluster-autoscaler-kamatera", parse_json=True)["data"]["cloud-config"]).decode()
         global_configs = []
+        nodegroup_configs = []
+        set_power_configs_on_nodegroup = bool(TEST_AUTOSCALER_CONFIG.get("set_power_configs_on_nodegroup"))
+        power_off_max_servers = int(TEST_AUTOSCALER_CONFIG.get("power_off_max_servers") or 0)
+        power_configs_target = nodegroup_configs if set_power_configs_on_nodegroup else global_configs
         if POWER_OFF_ON_SCALE_DOWN:
-            global_configs.append("poweroff-on-scale-down = true")
+            power_configs_target.append("poweroff-on-scale-down = true")
+            if power_off_max_servers:
+                assert set_power_configs_on_nodegroup
+                power_configs_target.append(f"poweroff-on-scale-down-max-servers = {power_off_max_servers}")
         if POWER_ON_ON_SCALE_UP:
-            global_configs.append("poweron-on-scale-up = true")
+            power_configs_target.append("poweron-on-scale-up = true")
         cloudconfig = cloudconfig.replace("[global]", "[global]\n" + "\n".join(global_configs))
+        cloudconfig = cloudconfig.replace('[nodegroup "autoscaler"]', '[nodegroup "autoscaler"]\n' + "\n".join(nodegroup_configs))
+        print(cloudconfig)
         with open(os.path.join(os.path.dirname(__file__), ".cloud-config"), "w") as f:
             f.write(cloudconfig)
         ca_args = [
@@ -197,9 +206,9 @@ def test():
             with print_wrapper():
                 return util.wait_for(*args, print_function=print_function, **kwargs)
 
-        def ensure_stability(*args, **kwargs):
+        def ensure_stability(expected_nodes, expected_pods, **kwargs):
             with print_wrapper():
-                return k8s_demo_app.ensure_stability(*args, print_function=print_function, **kwargs)
+                return k8s_demo_app.ensure_stability(expected_nodes, expected_pods, print_function=print_function, **kwargs)
 
         wait_for(
             f"3 nodes to be ready",
@@ -218,10 +227,7 @@ def test():
         )
         pods = util.kubectl("get", "pods", "-n", "demo", parse_json=True)["items"]
         assert len(pods) == 2 and all(pod["spec"]["nodeName"].startswith(f"{name_prefix}-autoscaler-") for pod in pods), pods
-        ensure_stability(
-            (3, 3),
-            (2, 2)
-        )
+        ensure_stability((3, 3), (2, 2))
         with print_wrapper():
             util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=0")
         wait_for(
@@ -247,18 +253,70 @@ def test():
             lambda: get_server_status(scaled_down_node_name) == expected_status,
         )
         with print_wrapper():
-            util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=2")
+            util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=3")
         wait_for(
-            f"at least 3 nodes total and 3 ready (after autoscaler powers on or creates a new node)",
-            lambda: count_at_least(util.kubectl_node_count(), (3, 3)),
+            f"at least 4 nodes total and 4 ready (after autoscaler powers on and creates a new node)",
+            lambda: count_at_least(util.kubectl_node_count(), (4, 4)),
             progress=lambda: util.kubectl("get", "nodes"),
         )
         wait_for(
-            "2 pods total and running (after autoscaler scales back up)",
-            lambda: util.kubectl_pods_count("demo") == (2, 2),
+            "3 pods total and running (after autoscaler scales back up)",
+            lambda: util.kubectl_pods_count("demo") == (3, 3),
             progress=lambda: util.kubectl("get", "pods", "-n", "demo"),
         )
-        ensure_stability_nodes_at_least((3, 3), (2, 2))
+        ensure_stability_nodes_at_least((4, 4), (3, 3))
+        with print_wrapper():
+            util.kubectl("scale", "deployment", "demo", "-n", "demo", "--replicas=0")
+        wait_for(
+            "all demo pods terminated",
+            lambda: util.kubectl_pods_count("demo") == (0, 0),
+            progress=lambda: util.kubectl("get", "pods", "-n", "demo"),
+        )
+        wait_for(
+            f"4 total nodes, 2 ready nodes (after autoscaler removes unneeded nodes)",
+            lambda: util.kubectl_node_count() == (4, 2),
+            progress=lambda: util.kubectl("get", "nodes"),
+        )
+        notready_node_names = []
+        for node in util.kubectl("get", "nodes", parse_json=True)["items"]:
+            for condition in node.get("status", {}).get("conditions", []):
+                if condition.get("type") == "Ready" and condition.get("status") != "True":
+                    notready_node_names.append(node["metadata"]["name"])
+        assert len(notready_node_names) == 2
+        if POWER_OFF_ON_SCALE_DOWN:
+            if POWER_ON_ON_SCALE_UP:
+                if power_off_max_servers:
+                    expected_statuses = ["power_off"]
+                    if power_off_max_servers > 1:
+                        expected_statuses.append("power_off")
+                    else:
+                        expected_statuses.append("not_found")
+                else:
+                    expected_statuses = ["power_off"] * 2
+            else:
+                # in this case we have some powered off servers which aren't reused but are still taken into account in the max servers count
+                expected_statuses = ["not_found"]
+                if power_off_max_servers and power_off_max_servers > 1:
+                    expected_statuses.append("power_off")
+                else:
+                    expected_statuses.append("not_found")
+        else:
+            expected_statuses = ["not_found"] * 2
+
+        def check_statuses():
+            actual_statuses = []
+            for node_name in notready_node_names:
+                status = get_server_status(node_name)
+                actual_statuses.append(status)
+            actual_statuses.sort()
+            expected_statuses.sort()
+            return actual_statuses == expected_statuses
+
+        wait_for(
+            f'scaled down nodes to be {expected_statuses}',
+            check_statuses,
+            progress=lambda: print(*[f"{name}: {get_server_status(name)}" for name in notready_node_names]),
+        )
         with print_wrapper():
             print_function("Autoscaler Test Completed Successfully")
     except:
