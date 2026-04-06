@@ -368,3 +368,99 @@ cluster-name=aaabbb
 		<-done
 	}
 }
+
+func TestManager_getNodeGroupInstances_HandleScaleDownRespectsMaxPoweredOffServers(t *testing.T) {
+	tests := []struct {
+		name                    string
+		maxPoweredOffServers    int
+		existingPoweredOffCount int
+		expectTerminate         bool
+	}{
+		{
+			name:                    "first powered off server is kept",
+			maxPoweredOffServers:    1,
+			existingPoweredOffCount: 0,
+			expectTerminate:         false,
+		},
+		{
+			name:                    "cap reached triggers terminate",
+			maxPoweredOffServers:    1,
+			existingPoweredOffCount: 1,
+			expectTerminate:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := kamateraClientMock{}
+			ctx := context.Background()
+			providerIDPrefix := "rke2://"
+			clusterTag := fmt.Sprintf("%s%s", clusterServerTagPrefix, "aaabbb")
+			nodeGroupTag := fmt.Sprintf("%s%s", nodeGroupTagPrefix, "ng1")
+			targetName := mockKamateraServerName()
+			targetProviderID := formatKamateraProviderID(providerIDPrefix, targetName)
+			targetInstance := &Instance{
+				Id:                targetProviderID,
+				PowerOn:           false,
+				Tags:              []string{clusterTag, nodeGroupTag},
+				Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceDeleting},
+				StatusCommandId:   "cmd-poweroff",
+				StatusCommandCode: InstanceCommandPoweroff,
+			}
+
+			nodeGroupInstances := map[string]*Instance{targetProviderID: targetInstance}
+			managerInstances := map[string]*Instance{targetProviderID: targetInstance}
+			servers := []Server{{Name: targetName, PowerOn: false, Tags: []string{clusterTag, nodeGroupTag}}}
+
+			for i := 0; i < tt.existingPoweredOffCount; i++ {
+				existingName := mockKamateraServerName()
+				existingProviderID := formatKamateraProviderID(providerIDPrefix, existingName)
+				existingInstance := &Instance{
+					Id:      existingProviderID,
+					PowerOn: false,
+					Tags:    []string{clusterTag, nodeGroupTag},
+				}
+				nodeGroupInstances[existingProviderID] = existingInstance
+				managerInstances[existingProviderID] = existingInstance
+				servers = append(servers, Server{Name: existingName, PowerOn: false, Tags: []string{clusterTag, nodeGroupTag}})
+			}
+
+			m := &manager{
+				client: &client,
+				config: &kamateraConfig{
+					clusterName:      "aaabbb",
+					providerIDPrefix: providerIDPrefix,
+				},
+				nodeGroups: map[string]*NodeGroup{
+					"ng1": {id: "ng1", instances: nodeGroupInstances},
+				},
+				instances: managerInstances,
+			}
+
+			client.On("getCommandStatus", ctx, "cmd-poweroff").Return(CommandStatusComplete, nil).Once()
+			if tt.expectTerminate {
+				client.On("StartServerTerminate", ctx, targetName, true).Return("cmd-terminate", nil).Once()
+			}
+
+			instances, err := m.getNodeGroupInstances("ng1", servers, &nodeGroupConfig{
+				PoweroffOnScaleDown:           true,
+				PoweroffOnScaleDownMaxServers: tt.maxPoweredOffServers,
+			})
+			assert.NoError(t, err)
+			instance, exists := instances[targetProviderID]
+			assert.True(t, exists)
+			assert.Same(t, targetInstance, instance)
+
+			if tt.expectTerminate {
+				assert.NotNil(t, instance.Status)
+				assert.Equal(t, cloudprovider.InstanceDeleting, instance.Status.State)
+				assert.Equal(t, "cmd-terminate", instance.StatusCommandId)
+				assert.Equal(t, InstanceCommandTerminate, instance.StatusCommandCode)
+			} else {
+				assert.Nil(t, instance.Status)
+				assert.Equal(t, "", instance.StatusCommandId)
+				assert.Equal(t, InstanceCommandNone, instance.StatusCommandCode)
+			}
+		})
+	}
+}
