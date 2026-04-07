@@ -276,6 +276,7 @@ def test():
             f"4 total nodes, 2 ready nodes (after autoscaler removes unneeded nodes)",
             lambda: util.kubectl_node_count() == (4, 2),
             progress=lambda: util.kubectl("get", "nodes"),
+            timeout_seconds=3600  # sometimes the autoscaler takes a while to remove nodes
         )
         notready_node_names = []
         for node in util.kubectl("get", "nodes", parse_json=True)["items"]:
@@ -337,7 +338,9 @@ def test():
         if keep_cluster:
             print(f'name_prefix="{name_prefix}"')
         else:
-            destroy.main(
-                name_prefix=name_prefix,
-                datacenter_id=datacenter_id,
+            util.wait_for(
+                'all resources to be deleted',
+                lambda: destroy.main(name_prefix=name_prefix, datacenter_id=datacenter_id),
+                timeout_seconds=3600,
+                retry_on_exception=True,
             )
