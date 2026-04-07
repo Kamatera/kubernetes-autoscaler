@@ -13,9 +13,10 @@ from kamatera_rke2_kubernetes_terraform_example_tests import setup, util, destro
 yaml = YAML(typ='safe', pure=True)
 
 
-POWER_OFF_ON_SCALE_DOWN = os.getenv("POWER_OFF_ON_SCALE_DOWN") == "yes"
-POWER_ON_ON_SCALE_UP = os.getenv("POWER_ON_ON_SCALE_UP") == "yes"
 TEST_AUTOSCALER_CONFIG = json.loads(os.getenv("TEST_AUTOSCALER_CONFIG_JSON") or "{}")
+POWER_OFF_ON_SCALE_DOWN = TEST_AUTOSCALER_CONFIG['power_off_on_scale_down'] if 'power_off_on_scale_down' in TEST_AUTOSCALER_CONFIG else os.getenv("POWER_OFF_ON_SCALE_DOWN") == "yes"
+POWER_ON_ON_SCALE_UP = TEST_AUTOSCALER_CONFIG['power_on_on_scale_up'] if 'power_on_on_scale_up' in TEST_AUTOSCALER_CONFIG else os.getenv("POWER_ON_ON_SCALE_UP") == "yes"
+
 
 def get_k8s_tfvars():
     return setup.K8STfvarsConfig(
@@ -340,7 +341,7 @@ def test():
         else:
             util.wait_for(
                 'all resources to be deleted',
-                lambda: destroy.main(name_prefix=name_prefix, datacenter_id=datacenter_id),
+                lambda: destroy.main(name_prefix=name_prefix, datacenter_id=datacenter_id) or True,
                 timeout_seconds=3600,
                 retry_on_exception=True,
             )

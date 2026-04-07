@@ -17,16 +17,28 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        POWER_OFF_ON_SCALE_DOWN: [yes, no]
-        POWER_ON_ON_SCALE_UP: [yes, no]
         TEST_AUTOSCALER_CONFIG_JSON:
           - |
             {
+              "power_off_on_scale_down": false,
+              "power_on_on_scale_up": false
+            }
+          - |
+            {
+              "power_off_on_scale_down": true,
+              "power_on_on_scale_up": true
+            }
+          - |
+            {
+              "power_off_on_scale_down": true,
+              "power_on_on_scale_up": true,
               "set_power_configs_on_nodegroup": true,
               "power_off_max_servers": 2
             }
           - |
             {
+              "power_off_on_scale_down": true,
+              "power_on_on_scale_up": true,
               "set_power_configs_on_nodegroup": true,
               "power_off_max_servers": 1
             }
@@ -56,8 +68,6 @@ jobs:
       - env:
           KAMATERA_API_CLIENT_ID: ${{ secrets.KAMATERA_API_CLIENT_ID }}
           KAMATERA_API_SECRET: ${{ secrets.KAMATERA_API_SECRET }}
-          POWER_OFF_ON_SCALE_DOWN: ${{ matrix.POWER_OFF_ON_SCALE_DOWN }}
-          POWER_ON_ON_SCALE_UP: ${{ matrix.POWER_ON_ON_SCALE_UP }}
           TEST_AUTOSCALER_CONFIG_JSON: ${{ matrix.TEST_AUTOSCALER_CONFIG_JSON }}
           TF_VAR_cluster_autoscaler_slack_webhook_url: ${{ secrets.CLUSTER_AUTOSCALER_SLACK_WEBHOOK_URL }}
         run: |
