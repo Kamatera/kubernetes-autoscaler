@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"sync"
 
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
@@ -97,7 +98,7 @@ func (m *manager) refresh() error {
 
 func (m *manager) buildNodeGroup(name string, cfg *nodeGroupConfig, servers []Server) (*NodeGroup, error) {
 	// TODO: do validation of server args with Kamatera api
-	instances, err := m.getNodeGroupInstances(name, servers)
+	instances, err := m.getNodeGroupInstances(name, servers, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get instances for node group %s: %v", name, err)
 	}
@@ -179,24 +180,30 @@ func (m *manager) buildNodeGroup(name string, cfg *nodeGroupConfig, servers []Se
 	if exists {
 		ng.minSize = cfg.minSize
 		ng.maxSize = cfg.maxSize
+		ng.poweroffOnScaleDown = cfg.PoweroffOnScaleDown
+		ng.poweroffOnScaleDownMaxServers = cfg.PoweroffOnScaleDownMaxServers
+		ng.poweronOnScaleUp = cfg.PoweronOnScaleUp
 		ng.instances = instances
 		ng.serverConfig = serverConfig
 		ng.templateLabels = cfg.TemplateLabels
 	} else {
 		ng = &NodeGroup{
-			id:             name,
-			manager:        m,
-			minSize:        cfg.minSize,
-			maxSize:        cfg.maxSize,
-			instances:      instances,
-			serverConfig:   serverConfig,
-			templateLabels: cfg.TemplateLabels,
+			id:                            name,
+			manager:                       m,
+			minSize:                       cfg.minSize,
+			maxSize:                       cfg.maxSize,
+			poweroffOnScaleDown:           cfg.PoweroffOnScaleDown,
+			poweroffOnScaleDownMaxServers: cfg.PoweroffOnScaleDownMaxServers,
+			poweronOnScaleUp:              cfg.PoweronOnScaleUp,
+			instances:                     instances,
+			serverConfig:                  serverConfig,
+			templateLabels:                cfg.TemplateLabels,
 		}
 	}
 	return ng, nil
 }
 
-func (m *manager) getNodeGroupInstances(name string, servers []Server) (map[string]*Instance, error) {
+func (m *manager) getNodeGroupInstances(name string, servers []Server, cfg *nodeGroupConfig) (map[string]*Instance, error) {
 	clusterTag := fmt.Sprintf("%s%s", clusterServerTagPrefix, m.config.clusterName)
 	nodeGroupTag := fmt.Sprintf("%s%s", nodeGroupTagPrefix, name)
 	instances := make(map[string]*Instance)
@@ -208,6 +215,9 @@ func (m *manager) getNodeGroupInstances(name string, servers []Server) (map[stri
 		}
 	}
 	var refreshedInstanceProviderIDs []string
+	instancesToHandleScaleDown := []string{}
+	instancesToHandleScaleDownSet := map[string]bool{}
+	poweredOffInstances := map[string]bool{}
 	for _, server := range servers {
 		hasClusterTag := false
 		hasNodeGroupTag := false
@@ -219,6 +229,7 @@ func (m *manager) getNodeGroupInstances(name string, servers []Server) (map[stri
 			}
 		}
 		cloudProviderID := formatKamateraProviderID(m.config.providerIDPrefix, server.Name)
+		poweredOffInstances[cloudProviderID] = !server.PowerOn
 		if m.instances[cloudProviderID] == nil {
 			// create a new instance object
 			instance := &Instance{
@@ -227,11 +238,19 @@ func (m *manager) getNodeGroupInstances(name string, servers []Server) (map[stri
 				Tags:    server.Tags,
 			}
 			refreshedInstanceProviderIDs = append(refreshedInstanceProviderIDs, cloudProviderID)
-			if !instance.refresh(m.client, m.config.providerIDPrefix, m.config.PoweroffOnScaleDown, m.kubeClient, true) {
+			needToDelete, needToHandleScaleDown := instance.refresh(m.client, m.config.providerIDPrefix, true)
+			if !needToDelete {
 				m.instances[cloudProviderID] = instance
 				if hasClusterTag && hasNodeGroupTag {
 					instances[cloudProviderID] = instance
 				}
+			}
+			if needToHandleScaleDown && !instancesToHandleScaleDownSet[cloudProviderID] {
+				instancesToHandleScaleDown = append(instancesToHandleScaleDown, cloudProviderID)
+				instancesToHandleScaleDownSet[cloudProviderID] = true
+			}
+			if instance.StatusCommandCode == InstanceCommandPoweroff {
+				poweredOffInstances[cloudProviderID] = true
 			}
 		} else {
 			// update an existing instance
@@ -239,10 +258,18 @@ func (m *manager) getNodeGroupInstances(name string, servers []Server) (map[stri
 			instance.PowerOn = server.PowerOn
 			instance.Tags = server.Tags
 			refreshedInstanceProviderIDs = append(refreshedInstanceProviderIDs, cloudProviderID)
-			if instance.refresh(m.client, m.config.providerIDPrefix, m.config.PoweroffOnScaleDown, m.kubeClient, true) {
+			needToDelete, needToHandleScaleDown := instance.refresh(m.client, m.config.providerIDPrefix, true)
+			if needToDelete {
 				delete(m.instances, cloudProviderID)
 			} else if hasClusterTag && hasNodeGroupTag {
 				instances[cloudProviderID] = instance
+			}
+			if needToHandleScaleDown && !instancesToHandleScaleDownSet[cloudProviderID] {
+				instancesToHandleScaleDown = append(instancesToHandleScaleDown, cloudProviderID)
+				instancesToHandleScaleDownSet[cloudProviderID] = true
+			}
+			if instance.StatusCommandCode == InstanceCommandPoweroff {
+				poweredOffInstances[cloudProviderID] = true
 			}
 		}
 	}
@@ -255,9 +282,36 @@ func (m *manager) getNodeGroupInstances(name string, servers []Server) (map[stri
 			}
 		}
 		if !wasRefreshed {
-			if m.instances[instance.Id].refresh(m.client, m.config.providerIDPrefix, m.config.PoweroffOnScaleDown, m.kubeClient, false) {
+			needToDelete, needToHandleScaleDown := m.instances[instance.Id].refresh(m.client, m.config.providerIDPrefix, false)
+			if needToDelete {
 				delete(m.instances, instance.Id)
 				delete(instances, instance.Id)
+			}
+			if needToHandleScaleDown && !instancesToHandleScaleDownSet[instance.Id] {
+				instancesToHandleScaleDown = append(instancesToHandleScaleDown, instance.Id)
+				instancesToHandleScaleDownSet[instance.Id] = true
+			}
+			if instance.StatusCommandCode == InstanceCommandPoweroff {
+				poweredOffInstances[instance.Id] = true
+			}
+		}
+	}
+	numPoweredOffInstances := 0
+	for instanceId, poweredOff := range poweredOffInstances {
+		if poweredOff {
+			if _, exists := instances[instanceId]; exists && !instancesToHandleScaleDownSet[instanceId] {
+				numPoweredOffInstances++
+			}
+		}
+	}
+	sort.Strings(instancesToHandleScaleDown)
+	for _, instanceId := range instancesToHandleScaleDown {
+		if instance, exists := instances[instanceId]; exists {
+			if instance.handleScaleDown(
+				cfg.PoweroffOnScaleDown, cfg.PoweroffOnScaleDownMaxServers, numPoweredOffInstances,
+				m.kubeClient, m.client, m.config.providerIDPrefix,
+			) {
+				numPoweredOffInstances++
 			}
 		}
 	}

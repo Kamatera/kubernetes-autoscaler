@@ -57,8 +57,10 @@ func TestInstance_refresh_PoweroffOnScaleDownClearsNodeMetadata(t *testing.T) {
 		StatusCommandCode: InstanceCommandPoweroff,
 	}
 
-	needToDelete := instance.refresh(&client, providerIDPrefix, true, kubeClient, true)
+	needToDelete, needToHandleScaleDown := instance.refresh(&client, providerIDPrefix, true)
 	assert.False(t, needToDelete)
+	assert.True(t, needToHandleScaleDown)
+	assert.True(t, instance.handleScaleDown(true, 0, 0, kubeClient, &client, providerIDPrefix))
 	assert.Nil(t, instance.Status)
 
 	node, err := kubeClient.CoreV1().Nodes().Get(ctx, serverName, metav1.GetOptions{})

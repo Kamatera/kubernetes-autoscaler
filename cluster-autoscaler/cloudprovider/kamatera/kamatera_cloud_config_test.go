@@ -361,3 +361,41 @@ default-ssh-key="ssh-rsa AAAA111\nssh-rsa BBBB222"
 	assert.NoError(t, err)
 	assert.Equal(t, "ssh-rsa AAAA111\nssh-rsa BBBB222", config.nodeGroupCfg["default"].SshKey)
 }
+
+func TestCloudConfig_buildCloudConfig_NodeGroupPowerOptions(t *testing.T) {
+	cfg := strings.NewReader(`
+[global]
+kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i
+kamatera-api-secret=9ii88h7g6f55555ee4444444dd33eee2
+cluster-name=aaabbb
+poweroff-on-scale-down=true
+poweron-on-scale-up=false
+
+[nodegroup "default"]
+
+[nodegroup "override"]
+poweroff-on-scale-down=false
+poweroff-on-scale-down-max-servers=3
+poweron-on-scale-up=true
+`)
+	config, err := buildCloudConfig(cfg)
+	assert.NoError(t, err)
+	assert.True(t, config.nodeGroupCfg["default"].PoweroffOnScaleDown)
+	assert.False(t, config.nodeGroupCfg["default"].PoweronOnScaleUp)
+	assert.Equal(t, 0, config.nodeGroupCfg["default"].PoweroffOnScaleDownMaxServers)
+	assert.False(t, config.nodeGroupCfg["override"].PoweroffOnScaleDown)
+	assert.True(t, config.nodeGroupCfg["override"].PoweronOnScaleUp)
+	assert.Equal(t, 3, config.nodeGroupCfg["override"].PoweroffOnScaleDownMaxServers)
+
+	cfg = strings.NewReader(`
+[global]
+kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i
+kamatera-api-secret=9ii88h7g6f55555ee4444444dd33eee2
+cluster-name=aaabbb
+
+[nodegroup "default"]
+poweroff-on-scale-down-max-servers=-1
+`)
+	_, err = buildCloudConfig(cfg)
+	assert.ErrorContains(t, err, "poweroff-on-scale-down-max-servers")
+}
