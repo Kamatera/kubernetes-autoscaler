@@ -165,11 +165,13 @@ func (i *Instance) extendedDebug() string {
 }
 
 // refresh updates the instance status by checking the status of any ongoing command
-// if it returns true it means the instance needs to be deleted
+// returns:
+// needToDelete = true - the instance needs to be deleted
+// needToHandleScaleDown = true - the instance needs to handle scale down (poweroff or terminate depending on the configuration)
 func (i *Instance) refresh(
-	client kamateraAPIClient, providerIDPrefix string, powerOffOnScaleDown bool,
-	kubeClient kubernetes.Interface, hasServer bool,
-) (needToDelete bool) {
+	client kamateraAPIClient, providerIDPrefix string, hasServer bool,
+) (needToDelete bool, needToHandleScaleDown bool) {
+	needToHandleScaleDown = false
 	ctx := context.Background()
 	serverName := parseKamateraProviderID(providerIDPrefix, i.Id)
 	logPrefix := fmt.Sprintf("Kamatera server '%s'", serverName)
@@ -179,10 +181,10 @@ func (i *Instance) refresh(
 			i.Status = nil
 		} else if !hasServer && i.Status == nil {
 			klog.Warningf("%s: server not found and has no status - removing from instances", logPrefix)
-			return true
+			return true, needToHandleScaleDown
 		} else if !hasServer && i.Status != nil && i.Status.State == cloudprovider.InstanceDeleting {
 			klog.V(2).Infof("%s: server not found and in deleting state - removing from instances", logPrefix)
-			return true
+			return true, needToHandleScaleDown
 		} else if i.PowerOn && i.Status == nil {
 			klog.V(2).Infof("%s: node is powered on and status is nil, setting state to running", logPrefix)
 			i.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
@@ -240,26 +242,12 @@ func (i *Instance) refresh(
 				} else if i.Status.State == cloudprovider.InstanceDeleting {
 					// instance deletion process - update state and complete the deletion process
 					if commandCode == InstanceCommandPoweroff {
-						// poweroff completed - now we can continue to terminate the instance
-						if powerOffOnScaleDown {
-							// poweroff is the last step - we clear the status to indicate instance is not managed by CA anymore
-							// but we don't delete it because it might be powered on later
-							klog.V(2).Infof("Instance %s powered off for scale down - clearing status", serverName)
-							if err := clearAutoscalerMetadataFromNode(kubeClient, serverName); err != nil {
-								klog.Errorf("Instance %s powered off for scale down - failed to clear Kubernetes node metadata: %v", serverName, err)
-							}
-							i.Status = nil
-						} else {
-							// continue to terminate the instance
-							// the terminate function will set the appropriate status and command ID
-							// and update ErrorInfo if needed
-							klog.V(2).Infof("Instance %s powered off for scale down - continuing to terminate", serverName)
-							_ = i.terminate(client, providerIDPrefix)
-						}
+						// poweroff completed - now we can continue to handle the scale down based on configuration
+						needToHandleScaleDown = true
 					} else if commandCode == InstanceCommandTerminate {
 						// terminate completed - in this case we delete the instance
 						klog.V(2).Infof("Instance %s terminated for scale down - marking for deletion", serverName)
-						return true
+						return true, needToHandleScaleDown
 					} else {
 						klog.Warningf("Instance %s command completed but unexpected command code: %v", serverName, commandCode)
 					}
@@ -269,7 +257,31 @@ func (i *Instance) refresh(
 			}
 		}
 	}
-	return false
+	return false, needToHandleScaleDown
+}
+
+func (i *Instance) handleScaleDown(
+	powerOffOnScaleDown bool, powerOffOnScaleDownMaxServers int, numPoweredOffServers int, kubeClient kubernetes.Interface,
+	client kamateraAPIClient, providerIDPrefix string,
+) bool {
+	serverName := parseKamateraProviderID(providerIDPrefix, i.Id)
+	if powerOffOnScaleDown && (powerOffOnScaleDownMaxServers == 0 || numPoweredOffServers < powerOffOnScaleDownMaxServers) {
+		// poweroff is the last step - we clear the status to indicate instance is not managed by CA anymore
+		// but we don't delete it because it might be powered on later
+		klog.V(2).Infof("Instance %s powered off for scale down - clearing status", serverName)
+		if err := clearAutoscalerMetadataFromNode(kubeClient, serverName); err != nil {
+			klog.Errorf("Instance %s powered off for scale down - failed to clear Kubernetes node metadata: %v", serverName, err)
+		}
+		i.Status = nil
+		return true
+	} else {
+		// continue to terminate the instance
+		// the terminate function will set the appropriate status and command ID
+		// and update ErrorInfo if needed
+		klog.V(2).Infof("Instance %s powered off for scale down - continuing to terminate", serverName)
+		_ = i.terminate(client, providerIDPrefix)
+		return false
+	}
 }
 
 const (

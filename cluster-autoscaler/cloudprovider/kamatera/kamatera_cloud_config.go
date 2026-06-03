@@ -32,23 +32,26 @@ const (
 
 // nodeGroupConfig is the configuration for a specific node group.
 type nodeGroupConfig struct {
-	minSize        int
-	maxSize        int
-	NamePrefix     string
-	Password       string
-	SshKey         string
-	Datacenter     string
-	Image          string
-	Cpu            string
-	Ram            string
-	Disks          []string
-	Dailybackup    bool
-	Managed        bool
-	Networks       []string
-	BillingCycle   string
-	MonthlyPackage string
-	ScriptBase64   string
-	TemplateLabels []string
+	minSize                       int
+	maxSize                       int
+	PoweroffOnScaleDown           bool
+	PoweroffOnScaleDownMaxServers int
+	PoweronOnScaleUp              bool
+	NamePrefix                    string
+	Password                      string
+	SshKey                        string
+	Datacenter                    string
+	Image                         string
+	Cpu                           string
+	Ram                           string
+	Disks                         []string
+	Dailybackup                   bool
+	Managed                       bool
+	Networks                      []string
+	BillingCycle                  string
+	MonthlyPackage                string
+	ScriptBase64                  string
+	TemplateLabels                []string
 }
 
 // kamateraConfig holds the configuration for the Kamatera provider.
@@ -96,23 +99,26 @@ type GcfgGlobalConfig struct {
 
 // GcfgNodeGroupConfig is the gcfg representation of the section in the cloud config file to change defaults for a node group.
 type GcfgNodeGroupConfig struct {
-	MinSize        string   `gcfg:"min-size"`
-	MaxSize        string   `gcfg:"max-size"`
-	NamePrefix     string   `gcfg:"name-prefix"`
-	Password       string   `gcfg:"password"`
-	SshKey         string   `gcfg:"ssh-key"`
-	Datacenter     string   `gcfg:"datacenter"`
-	Image          string   `gcfg:"image"`
-	Cpu            string   `gcfg:"cpu"`
-	Ram            string   `gcfg:"ram"`
-	Disks          []string `gcfg:"disk"`
-	Dailybackup    bool     `gcfg:"dailybackup"`
-	Managed        bool     `gcfg:"managed"`
-	Networks       []string `gcfg:"network"`
-	BillingCycle   string   `gcfg:"billingcycle"`
-	MonthlyPackage string   `gcfg:"monthlypackage"`
-	ScriptBase64   string   `gcfg:"script-base64"`
-	TemplateLabels []string `gcfg:"template-label"`
+	MinSize                       string   `gcfg:"min-size"`
+	MaxSize                       string   `gcfg:"max-size"`
+	PoweroffOnScaleDown           string   `gcfg:"poweroff-on-scale-down"`
+	PoweroffOnScaleDownMaxServers string   `gcfg:"poweroff-on-scale-down-max-servers"`
+	PoweronOnScaleUp              string   `gcfg:"poweron-on-scale-up"`
+	NamePrefix                    string   `gcfg:"name-prefix"`
+	Password                      string   `gcfg:"password"`
+	SshKey                        string   `gcfg:"ssh-key"`
+	Datacenter                    string   `gcfg:"datacenter"`
+	Image                         string   `gcfg:"image"`
+	Cpu                           string   `gcfg:"cpu"`
+	Ram                           string   `gcfg:"ram"`
+	Disks                         []string `gcfg:"disk"`
+	Dailybackup                   bool     `gcfg:"dailybackup"`
+	Managed                       bool     `gcfg:"managed"`
+	Networks                      []string `gcfg:"network"`
+	BillingCycle                  string   `gcfg:"billingcycle"`
+	MonthlyPackage                string   `gcfg:"monthlypackage"`
+	ScriptBase64                  string   `gcfg:"script-base64"`
+	TemplateLabels                []string `gcfg:"template-label"`
 }
 
 // gcfgCloudConfig is the gcfg representation of the cloud config file for Kamatera.
@@ -180,6 +186,18 @@ func buildCloudConfig(config io.Reader) (*kamateraConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cannot get size values for node group %s: %v", nodeGroupName, err)
 		}
+		poweroffOnScaleDown, err := getBoolValue(gcfgNodeGroup.PoweroffOnScaleDown, gcfgCloudConfig.Global.PoweroffOnScaleDown)
+		if err != nil {
+			return nil, fmt.Errorf("cannot get poweroff-on-scale-down value for node group %s: %v", nodeGroupName, err)
+		}
+		poweroffOnScaleDownMaxServers, err := getNonNegativeIntValue(gcfgNodeGroup.PoweroffOnScaleDownMaxServers, 0)
+		if err != nil {
+			return nil, fmt.Errorf("cannot get poweroff-on-scale-down-max-servers value for node group %s: %v", nodeGroupName, err)
+		}
+		poweronOnScaleUp, err := getBoolValue(gcfgNodeGroup.PoweronOnScaleUp, gcfgCloudConfig.Global.PoweronOnScaleUp)
+		if err != nil {
+			return nil, fmt.Errorf("cannot get poweron-on-scale-up value for node group %s: %v", nodeGroupName, err)
+		}
 		namePrefix := gcfgCloudConfig.Global.DefaultNamePrefix
 		if len(gcfgNodeGroup.NamePrefix) > 0 {
 			namePrefix = gcfgNodeGroup.NamePrefix
@@ -238,23 +256,26 @@ func buildCloudConfig(config io.Reader) (*kamateraConfig, error) {
 		}
 		templateLabels := gcfgNodeGroup.TemplateLabels
 		ngc := &nodeGroupConfig{
-			maxSize:        maxSize,
-			minSize:        minSize,
-			NamePrefix:     namePrefix,
-			Password:       password,
-			SshKey:         sshKey,
-			Datacenter:     datacenter,
-			Image:          image,
-			Cpu:            cpu,
-			Ram:            ram,
-			Disks:          disks,
-			Dailybackup:    dailybackup,
-			Managed:        managed,
-			Networks:       networks,
-			BillingCycle:   billingCycle,
-			MonthlyPackage: monthlyPackage,
-			ScriptBase64:   scriptBase64,
-			TemplateLabels: templateLabels,
+			maxSize:                       maxSize,
+			minSize:                       minSize,
+			PoweroffOnScaleDown:           poweroffOnScaleDown,
+			PoweroffOnScaleDownMaxServers: poweroffOnScaleDownMaxServers,
+			PoweronOnScaleUp:              poweronOnScaleUp,
+			NamePrefix:                    namePrefix,
+			Password:                      password,
+			SshKey:                        sshKey,
+			Datacenter:                    datacenter,
+			Image:                         image,
+			Cpu:                           cpu,
+			Ram:                           ram,
+			Disks:                         disks,
+			Dailybackup:                   dailybackup,
+			Managed:                       managed,
+			Networks:                      networks,
+			BillingCycle:                  billingCycle,
+			MonthlyPackage:                monthlyPackage,
+			ScriptBase64:                  scriptBase64,
+			TemplateLabels:                templateLabels,
 		}
 		nodeGroupCfg[nodeGroupName] = ngc
 	}
@@ -300,4 +321,33 @@ func getSizeLimits(minStr string, maxStr string, defaultMin int, defaultMax int)
 			min, max)
 	}
 	return min, max, nil
+}
+
+func getBoolValue(value string, defaultValue bool) (bool, error) {
+	if value == "" {
+		return defaultValue, nil
+	}
+
+	parsedValue, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("could not parse boolean value %q: %v", value, err)
+	}
+
+	return parsedValue, nil
+}
+
+func getNonNegativeIntValue(value string, defaultValue int) (int, error) {
+	if value == "" {
+		return defaultValue, nil
+	}
+
+	parsedValue, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("could not parse integer value %q: %v", value, err)
+	}
+	if parsedValue < 0 {
+		return 0, fmt.Errorf("value must be >= 0")
+	}
+
+	return parsedValue, nil
 }
