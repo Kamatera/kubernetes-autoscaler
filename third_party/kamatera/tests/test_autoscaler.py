@@ -5,6 +5,7 @@ import subprocess
 from textwrap import dedent
 import json
 import contextlib
+import random
 
 from ruamel.yaml import YAML
 
@@ -111,7 +112,7 @@ def test():
     name_prefix = use_existing_name_prefix or setup.generate_name_prefix()
     print(f'name_prefix="{name_prefix}"')
     k8s_version = os.getenv("K8S_VERSION") or "1.35"
-    datacenter_id = "US-NY2"
+    datacenter_id = "EU"
     with_bastion = False
     keep_cluster = os.getenv("KEEP_CLUSTER") == "yes"
     ca_p = None
@@ -337,7 +338,10 @@ def test():
         if keep_cluster:
             print(f'name_prefix="{name_prefix}"')
         else:
-            destroy.main(
-                name_prefix=name_prefix,
-                datacenter_id=datacenter_id,
+            util.wait_for(
+                "cluster to be destroyed",
+                lambda: destroy.main(name_prefix=name_prefix, datacenter_id=datacenter_id) or True,
+                retry_on_exception=True,
+                timeout_seconds=3600,
+                poll_seconds=random.randint(120, 240)
             )
