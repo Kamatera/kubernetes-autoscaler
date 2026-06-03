@@ -1,8 +1,7 @@
 on:
   push:
     branches:
-      - kamatera-cluster-autoscaler
-      - kamatera-cluster-autoscaler-release-*
+      - kamatera-cluster-autoscaler-*
     paths:
       - .github/workflows/ca-kamatera.yaml
       - third_party/kamatera/**
@@ -19,6 +18,17 @@ jobs:
       matrix:
         POWER_OFF_ON_SCALE_DOWN: [yes, no]
         POWER_ON_ON_SCALE_UP: [yes, no]
+        POWER_ON_ON_SCALE_UP_CONFIG_JSON:
+          - |
+            {
+              "set_power_configs_on_nodegroup": true,
+              "power_off_max_servers": 2
+            }
+          - |
+            {
+              "set_power_configs_on_nodegroup": true,
+              "power_off_max_servers": 1
+            }
       fail-fast: false  # ensure cleanup is done
     steps:
       - uses: actions/checkout@v6
@@ -49,12 +59,12 @@ jobs:
           POWER_ON_ON_SCALE_UP: ${{ matrix.POWER_ON_ON_SCALE_UP }}
           TF_VAR_cluster_autoscaler_slack_webhook_url: ${{ secrets.CLUSTER_AUTOSCALER_SLACK_WEBHOOK_URL }}
         run: |
+          cd kubernetes-autoscaler/cluster-autoscaler
           export K8S_VERSION="${GITHUB_REF_NAME#*kamatera-cluster-autoscaler-release-}"
-          if [ "${K8S_VERSION}" == "kamatera-cluster-autoscaler" ]; then
-            export K8S_VERSION="1.35"
+          if [ "${K8S_VERSION}" == "${GITHUB_REF_NAME}" ] ; then
+            export K8S_VERSION=$(grep -oP 'ClusterAutoscalerVersion\s*=\s*"\K[0-9]+\.[0-9]+' version/version.go)
           fi
           echo K8S_VERSION=${K8S_VERSION}
-          cd kubernetes-autoscaler/cluster-autoscaler
           # check if commit message contains "--skip-kamatera-tests" to skip tests
           if git log -1 --pretty=%B | grep -q -- "--skip-kamatera-tests"; then
             echo "Skipping Kamatera cluster-autoscaler tests"
