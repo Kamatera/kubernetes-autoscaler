@@ -371,10 +371,11 @@ cluster-name=aaabbb
 
 func TestManager_getNodeGroupInstances_HandleScaleDownRespectsMaxPoweredOffServers(t *testing.T) {
 	tests := []struct {
-		name                    string
-		maxPoweredOffServers    int
-		existingPoweredOffCount int
-		expectTerminate         bool
+		name                          string
+		maxPoweredOffServers          int
+		existingPoweredOffCount       int
+		existingTerminatingPoweredOff bool
+		expectTerminate               bool
 	}{
 		{
 			name:                    "first powered off server is kept",
@@ -387,6 +388,12 @@ func TestManager_getNodeGroupInstances_HandleScaleDownRespectsMaxPoweredOffServe
 			maxPoweredOffServers:    1,
 			existingPoweredOffCount: 1,
 			expectTerminate:         true,
+		},
+		{
+			name:                          "terminating powered off server does not count towards cap",
+			maxPoweredOffServers:          1,
+			existingTerminatingPoweredOff: true,
+			expectTerminate:               false,
 		},
 	}
 
@@ -423,6 +430,23 @@ func TestManager_getNodeGroupInstances_HandleScaleDownRespectsMaxPoweredOffServe
 				nodeGroupInstances[existingProviderID] = existingInstance
 				managerInstances[existingProviderID] = existingInstance
 				servers = append(servers, Server{Name: existingName, PowerOn: false, Tags: []string{clusterTag, nodeGroupTag}})
+			}
+
+			if tt.existingTerminatingPoweredOff {
+				existingName := mockKamateraServerName()
+				existingProviderID := formatKamateraProviderID(providerIDPrefix, existingName)
+				existingInstance := &Instance{
+					Id:                existingProviderID,
+					PowerOn:           false,
+					Tags:              []string{clusterTag, nodeGroupTag},
+					Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceDeleting},
+					StatusCommandId:   "cmd-terminate",
+					StatusCommandCode: InstanceCommandTerminate,
+				}
+				nodeGroupInstances[existingProviderID] = existingInstance
+				managerInstances[existingProviderID] = existingInstance
+				servers = append(servers, Server{Name: existingName, PowerOn: false, Tags: []string{clusterTag, nodeGroupTag}})
+				client.On("getCommandStatus", ctx, "cmd-terminate").Return(CommandStatusPending, nil).Once()
 			}
 
 			m := &manager{

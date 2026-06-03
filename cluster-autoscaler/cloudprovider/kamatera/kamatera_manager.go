@@ -299,7 +299,9 @@ func (m *manager) getNodeGroupInstances(name string, servers []Server, cfg *node
 	numPoweredOffInstances := 0
 	for instanceId, poweredOff := range poweredOffInstances {
 		if poweredOff {
-			if _, exists := instances[instanceId]; exists && !instancesToHandleScaleDownSet[instanceId] {
+			if instance, exists := instances[instanceId]; exists &&
+				!instancesToHandleScaleDownSet[instanceId] &&
+				instance.StatusCommandCode != InstanceCommandTerminate {
 				numPoweredOffInstances++
 			}
 		}
