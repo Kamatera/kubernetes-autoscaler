@@ -26,13 +26,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"k8s.io/klog/v2"
+	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"k8s.io/klog/v2"
 )
+
+var kamateraHTTPClient = &http.Client{Timeout: 5 * time.Minute}
 
 // ProviderConfig is the configuration for the Kamatera cloud provider
 type ProviderConfig struct {
@@ -41,135 +44,68 @@ type ProviderConfig struct {
 	ApiSecret   string
 }
 
-func request(ctx context.Context, provider ProviderConfig, method string, path string, body interface{}) (interface{}, error) {
-	buf := new(bytes.Buffer)
+func request(ctx context.Context, provider ProviderConfig, method string, path string, body interface{}, numRetries int, secondsBetweenRetries int) (interface{}, error) {
+	var payload []byte
 	if body != nil {
-		if err := json.NewEncoder(buf).Encode(body); err != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
 			return nil, err
 		}
+		payload = b
 	}
 	path = strings.TrimPrefix(path, "/")
+	logLevel := klog.Level(2)
+	if strings.HasPrefix(path, "service/queue") || (method == "GET" && path == "service/servers") {
+		logLevel = klog.Level(4)
+	}
 	url := fmt.Sprintf("%s/%s", provider.ApiUrl, path)
-	klog.V(2).Infof("kamatera request: %s %s %s", method, url, buf.String())
-	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("%s/%s", provider.ApiUrl, path), buf)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Add("AuthClientId", provider.ApiClientID)
-	req.Header.Add("AuthSecret", provider.ApiSecret)
-	req.Header.Add("Accept", "application/json")
-	req.Header.Add("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-
 	var result interface{}
-	err = json.NewDecoder(res.Body).Decode(&result)
-	if err != nil {
-		if res.StatusCode != 200 {
-			return nil, fmt.Errorf("bad status code from Kamatera API: %d", res.StatusCode)
+	var err error
+	for attempt := 0; attempt < numRetries; attempt++ {
+		result = nil
+		err = nil
+		klog.V(logLevel).Infof("kamatera request: %s %s %s", method, url, string(payload))
+		var r io.Reader
+		if payload != nil {
+			r = bytes.NewReader(payload) // NEW reader each try
 		}
-		return nil, fmt.Errorf("invalid response from Kamatera API: %+v", result)
-	}
-	if res.StatusCode != 200 {
-		return nil, fmt.Errorf("error response from Kamatera API (%d): %+v", res.StatusCode, result)
-	}
-	return result, nil
-}
-
-func waitCommand(ctx context.Context, provider ProviderConfig, commandID string) (map[string]interface{}, error) {
-	startTime := time.Now()
-	time.Sleep(2 * time.Second)
-
-	for {
-		if startTime.Add(40*time.Minute).Sub(time.Now()) < 0 {
-			return nil, errors.New("timeout waiting for Kamatera command to complete")
+		if attempt > 0 {
+			klog.V(logLevel).Infof("kamatera request retry %d", attempt)
+			time.Sleep(time.Duration(secondsBetweenRetries<<attempt) * time.Second)
 		}
-
-		time.Sleep(2 * time.Second)
-
-		result, e := request(ctx, provider, "GET", fmt.Sprintf("/service/queue?id=%s", commandID), nil)
+		req, e := http.NewRequestWithContext(ctx, method, url, r)
 		if e != nil {
-			return nil, e
+			err = e
+			continue
 		}
-
-		commands := result.([]interface{})
-		if len(commands) != 1 {
-			return nil, errors.New("invalid response from Kamatera queue API: invalid number of command responses")
+		req.Header.Add("AuthClientId", provider.ApiClientID)
+		req.Header.Add("AuthSecret", provider.ApiSecret)
+		req.Header.Add("Accept", "application/json")
+		req.Header.Add("Content-Type", "application/json")
+		res, e := kamateraHTTPClient.Do(req)
+		if e != nil {
+			err = e
+			continue
 		}
-
-		command := commands[0].(map[string]interface{})
-		status, hasStatus := command["status"]
-		if hasStatus {
-			switch status.(string) {
-			case "complete":
-				return command, nil
-			case "error":
-				log, hasLog := command["log"]
-				if hasLog {
-					return nil, fmt.Errorf("kamatera command failed: %s", log)
+		e = func() error {
+			defer res.Body.Close()
+			decErr := json.NewDecoder(res.Body).Decode(&result)
+			if decErr != nil {
+				if res.StatusCode != 200 {
+					return fmt.Errorf("bad status code from Kamatera API: %d", res.StatusCode)
 				}
-				return nil, fmt.Errorf("kamatera command failed: %v", command)
+				return fmt.Errorf("invalid response from Kamatera API: %+v", result)
+			} else if res.StatusCode != 200 {
+				return fmt.Errorf("error response from Kamatera API (%d): %+v", res.StatusCode, result)
 			}
+			return nil
+		}()
+		if e != nil {
+			err = e
+			continue
 		}
+		err = nil
+		break
 	}
-}
-
-func waitCommands(ctx context.Context, provider ProviderConfig, commandIds map[string]string) (map[string]interface{}, error) {
-	startTime := time.Now()
-	time.Sleep(2 * time.Second)
-
-	commandIdsResults := make(map[string]interface{})
-	for id := range commandIds {
-		commandIdsResults[id] = nil
-	}
-
-	for {
-		if startTime.Add((40)*time.Minute).Sub(time.Now()) < 0 {
-			return nil, errors.New("timeout waiting for Kamatera commands to complete")
-		}
-
-		time.Sleep(2 * time.Second)
-
-		for id, result := range commandIdsResults {
-			if result == nil {
-				commandId := commandIds[id]
-				result, e := request(ctx, provider, "GET", fmt.Sprintf("/service/queue?id=%s", commandId), nil)
-				if e != nil {
-					return nil, e
-				}
-				commands := result.([]interface{})
-				if len(commands) != 1 {
-					return nil, errors.New("invalid response from Kamatera queue API: invalid number of command responses")
-				}
-				command := commands[0].(map[string]interface{})
-				status, hasStatus := command["status"]
-				if hasStatus {
-					switch status.(string) {
-					case "complete":
-						commandIdsResults[id] = command
-						break
-					case "error":
-						log, hasLog := command["log"]
-						if hasLog {
-							return nil, fmt.Errorf("kamatera command failed: %s", log)
-						}
-						return nil, fmt.Errorf("kamatera command failed: %v", command)
-					}
-				}
-			}
-		}
-
-		numComplete := 0
-		for _, result := range commandIdsResults {
-			if result != nil {
-				numComplete++
-			}
-		}
-		if numComplete == len(commandIds) {
-			return commandIdsResults, nil
-		}
-	}
+	return result, err
 }
