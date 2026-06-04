@@ -1,47 +1,49 @@
-# Kubernetes Autoscaler
+# Kamatera Kubernetes Autoscaler
 
-[![Release Charts](https://github.com/kubernetes/autoscaler/actions/workflows/release.yaml/badge.svg)](https://github.com/kubernetes/autoscaler/actions/workflows/release.yaml) [![Tests](https://github.com/kubernetes/autoscaler/actions/workflows/ci.yaml/badge.svg)](https://github.com/kubernetes/autoscaler/actions/workflows/ci.yaml) [![GoDoc Widget]][GoDoc]
+This is a fork of kubernetes/autoscaler with changes related to Kamatera Cloud Provider.
 
-This repository contains autoscaling-related components for Kubernetes.
+## Docker Images
 
-## What's inside
+Docker images are built for every Kubernetes minor version:
 
-[Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) - a component that automatically adjusts the size of a Kubernetes
-Cluster so that all pods have a place to run and there are no unneeded nodes. Supports several public cloud providers. Version 1.0 (GA) was released with kubernetes 1.8.
+* `ghcr.io/kamatera/kubernetes-autoscaler:kamatera-cluster-autoscaler-release-<KUBERNETES_MINOR_VERSION>`
+* e.g.: `ghcr.io/kamatera/kubernetes-autoscaler:kamatera-cluster-autoscaler-release-1.32`
 
-[Vertical Pod Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler) - a set of components that automatically adjust the
-amount of CPU and memory requested by pods running in the Kubernetes Cluster. Current state - beta.
+For a specific release the image is also tagged with the git sha of the commit:
 
-[Addon Resizer](https://github.com/kubernetes/autoscaler/tree/master/addon-resizer) - a simplified version of vertical pod autoscaler that modifies
-resource requests of a deployment based on the number of nodes in the Kubernetes Cluster. Current state - beta.
+* `ghcr.io/kamatera/kubernetes-autoscaler:kamatera-cluster-autoscaler-release-<KUBERNETES_MINOR_VERSION>-<GIT_SHA>`
 
-[Charts](https://github.com/kubernetes/autoscaler/tree/master/charts) - Supported Helm charts for components above.
+## Branches
 
-## Contact Info
+All Kamatera-specific changes are in branches prefixed with `kamatera-`:
 
-Interested in autoscaling? Want to talk? Have questions, concerns or great ideas?
+* `kamatera-cluster-autoscaler`: Tracks the main autoscaler repository, focus on the cluster autoscaler component.
+* `kamatera-cluster-autoscaler-release-X.Y`: Release branches for the Kamatera cluster autoscaler
 
-Please join us on #sig-autoscaling at https://kubernetes.slack.com/, or join one
-of our weekly meetings.  See [the Kubernetes Community Repo](https://github.com/kubernetes/community/blob/master/sig-autoscaling/README.md) for more information.
+Changes from upstream are rebased onto these branches.
 
-## Getting the Code
+`master` branch is used to track changes pending merge to upstream, there will be a PR pending on `kubernetes/autoscaler` repo tracking it.
 
-Fork the repository in the cloud:
-1. Visit https://github.com/kubernetes/autoscaler
-1. Click Fork button (top right) to establish a cloud-based fork.
+## Integration Tests
 
-The code must be checked out as a subdirectory of `k8s.io`, and not `github.com`.
+Tests run on every push to `kamatera-cluster-autoscaler-*` branches with various configurations and environments from `.github/workflows/ca-kamatera.yaml`
 
-```shell
-mkdir -p $GOPATH/src/k8s.io
-cd $GOPATH/src/k8s.io
-# Replace "$YOUR_GITHUB_USERNAME" below with your github username
-git clone https://github.com/$YOUR_GITHUB_USERNAME/autoscaler.git
-cd autoscaler
-```
+Release branches run on the related kubernetes / autoscaler version.
 
-Please refer to Kubernetes [Github workflow guide] for more details.
+The tests use real Kamatera infra and create a lot of servers so they will be expensive to run.
 
-[GoDoc]: https://godoc.org/k8s.io/autoscaler
-[GoDoc Widget]: https://godoc.org/k8s.io/autoscaler?status.svg
-[Github workflow guide]: https://github.com/kubernetes/community/blob/master/contributors/guide/github-workflow.md
+The tests depend on infra and code from https://github.com/Kamatera/kamatera-rke2-kubernetes-terraform-example 
+
+### Running manually
+
+See `.github/workflows/ca-kamatera.yaml`
+
+### Cleaning-Up
+
+Sometimes resources are not cleaned up properly, to cleanup see - 
+
+https://github.com/Kamatera/kamatera-rke2-kubernetes-terraform-example/blob/main/tests/README.md 
+
+## Cluster Autoscaler
+
+See [cluster-autoscaler/cloudprovider/kamatera/README.md](cluster-autoscaler/cloudprovider/kamatera/README.md)
