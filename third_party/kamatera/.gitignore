@@ -1,0 +1,5 @@
+.venv
+.cloud-config
+.kubeconfig
+
+__pycache__
