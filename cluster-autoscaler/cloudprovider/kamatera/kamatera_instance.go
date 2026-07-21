@@ -54,6 +54,8 @@ const (
 	InstanceErrorGetCommandStatusFailed InstanceErrorCode = "InstanceErrorGetCommandStatusFailed"
 	// InstanceErrorCommandFailed indicates that the command failed during execution.
 	InstanceErrorCommandFailed InstanceErrorCode = "InstanceErrorCommandFailed"
+	// InstanceErrorCreatedPoweredOff indicates that create completed but the server is not powered on.
+	InstanceErrorCreatedPoweredOff InstanceErrorCode = "InstanceErrorCreatedPoweredOff"
 )
 
 // InstanceCommandCode represents the command being executed on the instance
@@ -164,6 +166,26 @@ func (i *Instance) extendedDebug() string {
 	return fmt.Sprintf("instance ID: %s state: %s powerOn: %v commandID: %s", i.Id, state, i.PowerOn, i.StatusCommandId)
 }
 
+func (i *Instance) countsTowardTarget() bool {
+	if i == nil || i.Status == nil || i.Status.State == cloudprovider.InstanceDeleting || i.Status.ErrorInfo != nil {
+		return false
+	}
+	if i.PowerOn {
+		return true
+	}
+	return i.StatusCommandId != ""
+}
+
+func (i *Instance) visibleToAutoscaler() bool {
+	if i == nil || i.Status == nil {
+		return false
+	}
+	if i.countsTowardTarget() || i.Status.State == cloudprovider.InstanceDeleting {
+		return true
+	}
+	return i.Status.State == cloudprovider.InstanceCreating && i.Status.ErrorInfo != nil
+}
+
 // refresh updates the instance status by checking the status of any ongoing command
 // returns:
 // needToDelete = true - the instance needs to be deleted
@@ -176,15 +198,19 @@ func (i *Instance) refresh(
 	serverName := parseKamateraProviderID(providerIDPrefix, i.Id)
 	logPrefix := fmt.Sprintf("Kamatera server '%s'", serverName)
 	if i.StatusCommandId == "" {
-		if i.Status != nil && i.Status.State == cloudprovider.InstanceDeleting && !i.PowerOn {
+		if !hasServer {
+			if i.Status != nil && i.Status.State == cloudprovider.InstanceCreating && i.Status.ErrorInfo != nil {
+				klog.V(2).Infof("%s: server not found but instance has create error - keeping for autoscaler cleanup", logPrefix)
+				return false, needToHandleScaleDown
+			}
+			klog.Warningf("%s: server not found and has no active command - removing from instances", logPrefix)
+			return true, needToHandleScaleDown
+		} else if i.Status != nil && i.Status.State == cloudprovider.InstanceDeleting && !i.PowerOn {
 			klog.V(2).Infof("%s: instance deleted and not powered on - setting statue to nil", logPrefix)
 			i.Status = nil
-		} else if !hasServer && i.Status == nil {
-			klog.Warningf("%s: server not found and has no status - removing from instances", logPrefix)
-			return true, needToHandleScaleDown
-		} else if !hasServer && i.Status != nil && i.Status.State == cloudprovider.InstanceDeleting {
-			klog.V(2).Infof("%s: server not found and in deleting state - removing from instances", logPrefix)
-			return true, needToHandleScaleDown
+		} else if i.Status != nil && !i.PowerOn && i.Status.ErrorInfo == nil {
+			klog.Warningf("%s: status is %v but server is powered off and has no active command - clearing status", logPrefix, i.Status.State)
+			i.Status = nil
 		} else if i.PowerOn && i.Status == nil {
 			klog.V(2).Infof("%s: node is powered on and status is nil, setting state to running", logPrefix)
 			i.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
@@ -236,8 +262,21 @@ func (i *Instance) refresh(
 				if i.Status.State == cloudprovider.InstanceCreating {
 					if i.PowerOn {
 						klog.V(2).Infof("%s server created and powered on", i.Id)
+						i.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
+					} else if commandCode == InstanceCommandPoweron {
+						klog.Warningf("%s poweron completed but server is still powered off - clearing status", commandLogPrefix)
+						i.Status = nil
+					} else if commandCode == InstanceCommandCreating {
+						message := fmt.Sprintf("server %s was created but is still powered off", serverName)
+						klog.Warningf("%s %s", commandLogPrefix, message)
+						i.Status.ErrorInfo = &cloudprovider.InstanceErrorInfo{
+							ErrorClass:   cloudprovider.OtherErrorClass,
+							ErrorCode:    string(InstanceErrorCreatedPoweredOff),
+							ErrorMessage: message,
+						}
 					} else {
-						klog.V(2).Infof("%s server created but not powered on yet", i.Id)
+						klog.Warningf("%s command completed but server is still powered off - clearing status", commandLogPrefix)
+						i.Status = nil
 					}
 				} else if i.Status.State == cloudprovider.InstanceDeleting {
 					// instance deletion process - update state and complete the deletion process

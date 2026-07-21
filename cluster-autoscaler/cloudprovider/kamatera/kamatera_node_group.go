@@ -69,7 +69,7 @@ func (n *NodeGroup) MinSize() int {
 func (n *NodeGroup) TargetSize() (int, error) {
 	numInstances := 0
 	for _, instance := range n.instances {
-		if instance.Status != nil && instance.Status.State != cloudprovider.InstanceDeleting {
+		if instance.countsTowardTarget() {
 			numInstances += 1
 		}
 	}
@@ -172,7 +172,7 @@ func (n *NodeGroup) Debug() string {
 func (n *NodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 	var instances []cloudprovider.Instance
 	for _, instance := range n.instances {
-		if instance.Status != nil {
+		if instance.visibleToAutoscaler() {
 			instances = append(instances, cloudprovider.Instance{
 				Id:     instance.Id,
 				Status: instance.Status,

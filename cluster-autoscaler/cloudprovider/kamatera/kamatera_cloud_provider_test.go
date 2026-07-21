@@ -563,9 +563,10 @@ func kcpAssertNodeGroup(
 			assert.Nil(t, actualInstance.Status, "expected instance %s in node group %s to have nil status", instanceId, ngID)
 			assert.False(t, expectedInstance.HasErrorInfo, "expected instance %s in node group %s to not have error info when state is nil", instanceId, ngID)
 		} else {
-			assert.NotNil(t, actualInstance.Status, "expected instance %s in node group %s to have non-nil status", instanceId, ngID)
-			assert.Equal(t, *expectedInstance.State, actualInstance.Status.State, "unexpected state for instance %s in node group %s", instanceId, ngID)
-			assert.Equal(t, expectedInstance.HasErrorInfo, actualInstance.Status.ErrorInfo != nil, "unexpected error info presence for instance %s in node group %s", instanceId, ngID)
+			if assert.NotNil(t, actualInstance.Status, "expected instance %s in node group %s to have non-nil status", instanceId, ngID) {
+				assert.Equal(t, *expectedInstance.State, actualInstance.Status.State, "unexpected state for instance %s in node group %s", instanceId, ngID)
+				assert.Equal(t, expectedInstance.HasErrorInfo, actualInstance.Status.ErrorInfo != nil, "unexpected error info presence for instance %s in node group %s", instanceId, ngID)
+			}
 		}
 		assert.Equal(t, expectedInstance.CommandId, actualInstance.StatusCommandId, "unexpected command for instance %s in node group %s", instanceId, ngID)
 	}
@@ -652,9 +653,9 @@ max-size=3
 			).Once()
 			assert.NoError(t, ng.IncreaseSize(3))
 			instanceCreating := cloudprovider.InstanceCreating
-			kcpAssertNodeGroup(&kcp, t, "ng1", 3, 3, map[string]kcpExpectedInstance{
+			kcpAssertNodeGroup(&kcp, t, "ng1", 2, 3, map[string]kcpExpectedInstance{
 				"server1": {State: &instanceCreating, CommandId: "create-server-command-id-1", HasErrorInfo: false},
-				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
+				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				"server3": {State: &instanceCreating, CommandId: "create-server-command-id-3", HasErrorInfo: false},
 			})
 			// server 3 finished creation with error, server 1 still creating
@@ -666,9 +667,9 @@ max-size=3
 				CommandStatusError, nil,
 			).Once()
 			assert.NoError(t, kcp.Refresh())
-			kcpAssertNodeGroup(&kcp, t, "ng1", 3, 3, map[string]kcpExpectedInstance{
+			kcpAssertNodeGroup(&kcp, t, "ng1", 1, 3, map[string]kcpExpectedInstance{
 				"server1": {State: &instanceCreating, CommandId: "create-server-command-id-1", HasErrorInfo: false},
-				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
+				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				"server3": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 			})
 			// server 1 create command completed successfully, but still server is not listed in Kamatera API
@@ -677,9 +678,9 @@ max-size=3
 				CommandStatusComplete, nil,
 			).Once()
 			assert.NoError(t, kcp.Refresh())
-			kcpAssertNodeGroup(&kcp, t, "ng1", 3, 3, map[string]kcpExpectedInstance{
-				"server1": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
-				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
+			kcpAssertNodeGroup(&kcp, t, "ng1", 0, 3, map[string]kcpExpectedInstance{
+				"server1": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
+				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				"server3": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 			})
 			// now server 1 is listed but not powered on yet - doesn't change the instances state
@@ -687,9 +688,9 @@ max-size=3
 				{Name: "server1", PowerOn: false, Tags: ng.serverConfig.Tags},
 			}, nil).Once()
 			assert.NoError(t, kcp.Refresh())
-			kcpAssertNodeGroup(&kcp, t, "ng1", 3, 3, map[string]kcpExpectedInstance{
-				"server1": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
-				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
+			kcpAssertNodeGroup(&kcp, t, "ng1", 0, 3, map[string]kcpExpectedInstance{
+				"server1": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
+				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				"server3": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 			})
 			// now server 1 is powered on - state set to running
@@ -700,9 +701,9 @@ max-size=3
 				{Name: "server2", PowerOn: false, Tags: ng.serverConfig.Tags},
 			}, nil).Once()
 			assert.NoError(t, kcp.Refresh())
-			kcpAssertNodeGroup(&kcp, t, "ng1", 3, 3, map[string]kcpExpectedInstance{
+			kcpAssertNodeGroup(&kcp, t, "ng1", 1, 3, map[string]kcpExpectedInstance{
 				"server1": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
-				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
+				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				"server3": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 			})
 			// unexpectedly all 3 servers suddenly appear as powered on and registered in kubernetes
@@ -802,15 +803,15 @@ max-size=3
 			}
 			assert.NoError(t, kcp.Refresh())
 			if tt.poweroffOnScaleDown {
-				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 2, map[string]kcpExpectedInstance{
+				kcpAssertNodeGroup(&kcp, t, "ng1", 0, 1, map[string]kcpExpectedInstance{
 					"server1": {State: nil, CommandId: "", HasErrorInfo: false},
-					"server2": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
+					"server2": {State: nil, CommandId: "", HasErrorInfo: false},
 					"server3": {State: &instanceDeleting, CommandId: "", HasErrorInfo: true},
 				})
 			} else {
-				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 3, map[string]kcpExpectedInstance{
+				kcpAssertNodeGroup(&kcp, t, "ng1", 0, 2, map[string]kcpExpectedInstance{
 					"server1": {State: &instanceDeleting, CommandId: "server1-terminate", HasErrorInfo: false},
-					"server2": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
+					"server2": {State: nil, CommandId: "", HasErrorInfo: false},
 					"server3": {State: &instanceDeleting, CommandId: "", HasErrorInfo: true},
 				})
 			}
@@ -911,23 +912,23 @@ max-size=3
 			}
 			assert.NoError(t, kcp.Refresh())
 			if tt.poweronOnScaleUp && tt.poweroffOnScaleDown {
-				kcpAssertNodeGroup(&kcp, t, "ng1", 3, 3, map[string]kcpExpectedInstance{
-					"server1": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
+				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 2, map[string]kcpExpectedInstance{
+					"server1": {State: nil, CommandId: "", HasErrorInfo: false},
 					"server2": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
 					"server3": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				})
 			} else if tt.poweroffOnScaleDown {
-				kcpAssertNodeGroup(&kcp, t, "ng1", 3, 3, map[string]kcpExpectedInstance{
+				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 3, map[string]kcpExpectedInstance{
 					"server1": {State: nil, CommandId: "", HasErrorInfo: false},
 					"server2": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
 					"server3": {State: nil, CommandId: "", HasErrorInfo: false},
-					"server4": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
+					"server4": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 					"server5": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				})
 			} else {
-				kcpAssertNodeGroup(&kcp, t, "ng1", 3, 3, map[string]kcpExpectedInstance{
+				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 3, map[string]kcpExpectedInstance{
 					"server2": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
-					"server4": {State: &instanceCreating, CommandId: "", HasErrorInfo: false},
+					"server4": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 					"server5": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				})
 			}

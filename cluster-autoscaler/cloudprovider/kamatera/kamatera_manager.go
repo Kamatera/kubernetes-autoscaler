@@ -333,11 +333,21 @@ func (m *manager) snapshotInstances() map[string]*Instance {
 func (m *manager) addCreatingInstance(serverName string, commandId string, tags []string) *Instance {
 	cloudProviderID := formatKamateraProviderID(m.config.providerIDPrefix, serverName)
 	klog.V(4).Infof("Adding creating instance %s with command ID %s", cloudProviderID, commandId)
+	status := &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating}
+	commandCode := InstanceCommandCreating
+	if commandId == "" {
+		status.ErrorInfo = &cloudprovider.InstanceErrorInfo{
+			ErrorClass:   cloudprovider.OtherErrorClass,
+			ErrorCode:    string(InstanceErrorDidNotStart),
+			ErrorMessage: fmt.Sprintf("failed to start create server command for %s", serverName),
+		}
+		commandCode = InstanceCommandNone
+	}
 	instance := &Instance{
 		Id:                cloudProviderID,
-		Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+		Status:            status,
 		StatusCommandId:   commandId,
-		StatusCommandCode: InstanceCommandCreating,
+		StatusCommandCode: commandCode,
 		Tags:              tags,
 	}
 	m.instancesMu.Lock()

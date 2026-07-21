@@ -262,6 +262,30 @@ cluster-name=aaabbb
 	assert.Same(t, instance, m.instances[instance.Id])
 }
 
+func TestManager_addCreatingInstanceWithEmptyCommandIDSetsCreateError(t *testing.T) {
+	cfg := strings.NewReader(`
+[global]
+kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i
+kamatera-api-secret=9ii88h7g6f55555ee4444444dd33eee2
+provider-id-prefix=rke2://
+cluster-name=aaabbb
+`)
+	m, err := newManager(cfg, nil)
+	assert.NoError(t, err)
+
+	serverName := mockKamateraServerName()
+	instance := m.addCreatingInstance(serverName, "", []string{"tag1"})
+
+	assert.NotNil(t, instance)
+	assert.Equal(t, cloudprovider.InstanceCreating, instance.Status.State)
+	if assert.NotNil(t, instance.Status.ErrorInfo) {
+		assert.Equal(t, cloudprovider.OtherErrorClass, instance.Status.ErrorInfo.ErrorClass)
+		assert.Equal(t, string(InstanceErrorDidNotStart), instance.Status.ErrorInfo.ErrorCode)
+	}
+	assert.Equal(t, "", instance.StatusCommandId)
+	assert.Equal(t, InstanceCommandNone, instance.StatusCommandCode)
+}
+
 func TestManager_snapshotInstances(t *testing.T) {
 	cfg := strings.NewReader(`
 [global]
@@ -487,4 +511,35 @@ func TestManager_getNodeGroupInstances_HandleScaleDownRespectsMaxPoweredOffServe
 			}
 		})
 	}
+}
+
+func TestManager_getNodeGroupInstances_RemovesStaleCreatingInstanceMissingFromAPI(t *testing.T) {
+	providerIDPrefix := "rke2://"
+	clusterTag := fmt.Sprintf("%s%s", clusterServerTagPrefix, "aaabbb")
+	nodeGroupTag := fmt.Sprintf("%s%s", nodeGroupTagPrefix, "ng1")
+	staleName := mockKamateraServerName()
+	staleProviderID := formatKamateraProviderID(providerIDPrefix, staleName)
+	staleInstance := &Instance{
+		Id:      staleProviderID,
+		PowerOn: false,
+		Tags:    []string{clusterTag, nodeGroupTag},
+		Status:  &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+	}
+
+	m := &manager{
+		client: &kamateraClientMock{},
+		config: &kamateraConfig{
+			clusterName:      "aaabbb",
+			providerIDPrefix: providerIDPrefix,
+		},
+		nodeGroups: map[string]*NodeGroup{
+			"ng1": {id: "ng1", instances: map[string]*Instance{staleProviderID: staleInstance}},
+		},
+		instances: map[string]*Instance{staleProviderID: staleInstance},
+	}
+
+	instances, err := m.getNodeGroupInstances("ng1", nil, &nodeGroupConfig{})
+	assert.NoError(t, err)
+	assert.NotContains(t, instances, staleProviderID)
+	assert.NotContains(t, m.instances, staleProviderID)
 }

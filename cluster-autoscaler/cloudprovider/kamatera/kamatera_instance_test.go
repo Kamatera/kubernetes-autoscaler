@@ -70,3 +70,57 @@ func TestInstance_refresh_PoweroffOnScaleDownClearsNodeMetadata(t *testing.T) {
 	assert.False(t, taints.HasTaint(node, taints.DeletionCandidateTaint().Key))
 	assert.True(t, taints.HasTaint(node, "custom"))
 }
+
+func TestInstance_refresh_PoweronCompleteWhilePoweredOffClearsStatus(t *testing.T) {
+	providerIDPrefix := "rke2://"
+	serverName := mockKamateraServerName()
+	serverProviderID := formatKamateraProviderID(providerIDPrefix, serverName)
+	client := kamateraClientMock{}
+	ctx := context.Background()
+	client.On("getCommandStatus", ctx, "cmd-poweron").Return(CommandStatusComplete, nil).Once()
+	instance := &Instance{
+		Id:                serverProviderID,
+		Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+		PowerOn:           false,
+		StatusCommandId:   "cmd-poweron",
+		StatusCommandCode: InstanceCommandPoweron,
+	}
+
+	needToDelete, needToHandleScaleDown := instance.refresh(&client, providerIDPrefix, true)
+
+	assert.False(t, needToDelete)
+	assert.False(t, needToHandleScaleDown)
+	assert.Nil(t, instance.Status)
+	assert.Equal(t, "", instance.StatusCommandId)
+	assert.Equal(t, InstanceCommandNone, instance.StatusCommandCode)
+}
+
+func TestInstance_refresh_CreateCompleteWhilePoweredOffSetsCreateError(t *testing.T) {
+	providerIDPrefix := "rke2://"
+	serverName := mockKamateraServerName()
+	serverProviderID := formatKamateraProviderID(providerIDPrefix, serverName)
+	client := kamateraClientMock{}
+	ctx := context.Background()
+	client.On("getCommandStatus", ctx, "cmd-create").Return(CommandStatusComplete, nil).Once()
+	instance := &Instance{
+		Id:                serverProviderID,
+		Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+		PowerOn:           false,
+		StatusCommandId:   "cmd-create",
+		StatusCommandCode: InstanceCommandCreating,
+	}
+
+	needToDelete, needToHandleScaleDown := instance.refresh(&client, providerIDPrefix, true)
+
+	assert.False(t, needToDelete)
+	assert.False(t, needToHandleScaleDown)
+	assert.NotNil(t, instance.Status)
+	assert.Equal(t, cloudprovider.InstanceCreating, instance.Status.State)
+	if assert.NotNil(t, instance.Status.ErrorInfo) {
+		assert.Equal(t, cloudprovider.OtherErrorClass, instance.Status.ErrorInfo.ErrorClass)
+		assert.Equal(t, "InstanceErrorCreatedPoweredOff", instance.Status.ErrorInfo.ErrorCode)
+		assert.Contains(t, instance.Status.ErrorInfo.ErrorMessage, "created but is still powered off")
+	}
+	assert.Equal(t, "", instance.StatusCommandId)
+	assert.Equal(t, InstanceCommandNone, instance.StatusCommandCode)
+}

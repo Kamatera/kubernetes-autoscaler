@@ -310,6 +310,58 @@ func TestNodeGroup_DecreaseTargetSize(t *testing.T) {
 	assert.Equal(t, "Not implemented", err.Error())
 }
 
+func TestNodeGroup_TargetSize_ExcludesStaleCreatingInstances(t *testing.T) {
+	ng := NodeGroup{
+		instances: map[string]*Instance{
+			"rke2://running": {
+				Id:      "rke2://running",
+				PowerOn: true,
+				Status:  &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning},
+			},
+			"rke2://active-poweron": {
+				Id:                "rke2://active-poweron",
+				PowerOn:           false,
+				Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+				StatusCommandId:   "cmd-poweron",
+				StatusCommandCode: InstanceCommandPoweron,
+			},
+			"rke2://active-create": {
+				Id:                "rke2://active-create",
+				PowerOn:           false,
+				Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+				StatusCommandId:   "cmd-create",
+				StatusCommandCode: InstanceCommandCreating,
+			},
+			"rke2://stale-creating": {
+				Id:      "rke2://stale-creating",
+				PowerOn: false,
+				Status:  &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+			},
+			"rke2://create-error": {
+				Id:      "rke2://create-error",
+				PowerOn: false,
+				Status: &cloudprovider.InstanceStatus{
+					State: cloudprovider.InstanceCreating,
+					ErrorInfo: &cloudprovider.InstanceErrorInfo{
+						ErrorClass:   cloudprovider.OtherErrorClass,
+						ErrorCode:    "failed",
+						ErrorMessage: "create failed",
+					},
+				},
+			},
+			"rke2://deleting": {
+				Id:      "rke2://deleting",
+				PowerOn: true,
+				Status:  &cloudprovider.InstanceStatus{State: cloudprovider.InstanceDeleting},
+			},
+		},
+	}
+
+	targetSize, err := ng.TargetSize()
+	assert.NoError(t, err)
+	assert.Equal(t, 3, targetSize)
+}
+
 func TestNodeGroup_DeleteNodes(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -536,9 +588,9 @@ func TestNodeGroup_Nodes(t *testing.T) {
 		minSize: 1,
 		maxSize: 6,
 		instances: map[string]*Instance{
-			serverProviderID1: {Id: serverProviderID1, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
-			serverProviderID2: {Id: serverProviderID2, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
-			serverProviderID3: {Id: serverProviderID3, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
+			serverProviderID1: {Id: serverProviderID1, PowerOn: true, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
+			serverProviderID2: {Id: serverProviderID2, PowerOn: true, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
+			serverProviderID3: {Id: serverProviderID3, PowerOn: true, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
 		},
 		manager: &mgr,
 	}
@@ -556,6 +608,51 @@ func TestNodeGroup_Nodes(t *testing.T) {
 	assert.Contains(t, serverIds, formatKamateraProviderID(providerIDPrefix, serverName1))
 	assert.Contains(t, serverIds, formatKamateraProviderID(providerIDPrefix, serverName2))
 	assert.Contains(t, serverIds, formatKamateraProviderID(providerIDPrefix, serverName3))
+}
+
+func TestNodeGroup_Nodes_ExcludesStaleCreatingInstances(t *testing.T) {
+	ng := NodeGroup{
+		instances: map[string]*Instance{
+			"rke2://running": {
+				Id:      "rke2://running",
+				PowerOn: true,
+				Status:  &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning},
+			},
+			"rke2://active-create": {
+				Id:                "rke2://active-create",
+				PowerOn:           false,
+				Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+				StatusCommandId:   "cmd-create",
+				StatusCommandCode: InstanceCommandCreating,
+			},
+			"rke2://stale-creating": {
+				Id:      "rke2://stale-creating",
+				PowerOn: false,
+				Status:  &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+			},
+			"rke2://create-error": {
+				Id:      "rke2://create-error",
+				PowerOn: false,
+				Status: &cloudprovider.InstanceStatus{
+					State: cloudprovider.InstanceCreating,
+					ErrorInfo: &cloudprovider.InstanceErrorInfo{
+						ErrorClass:   cloudprovider.OtherErrorClass,
+						ErrorCode:    "failed",
+						ErrorMessage: "create failed",
+					},
+				},
+			},
+		},
+	}
+
+	instances, err := ng.Nodes()
+	assert.NoError(t, err)
+	ids := []string{}
+	for _, instance := range instances {
+		ids = append(ids, instance.Id)
+	}
+
+	assert.ElementsMatch(t, []string{"rke2://running", "rke2://active-create", "rke2://create-error"}, ids)
 }
 
 func TestNodeGroup_getResourceList(t *testing.T) {
@@ -652,9 +749,9 @@ func TestNodeGroup_Others(t *testing.T) {
 		minSize: 1,
 		maxSize: 7,
 		instances: map[string]*Instance{
-			serverName1: {Id: serverName1, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
-			serverName2: {Id: serverName2, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
-			serverName3: {Id: serverName3, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
+			serverName1: {Id: serverName1, PowerOn: true, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
+			serverName2: {Id: serverName2, PowerOn: true, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
+			serverName3: {Id: serverName3, PowerOn: true, Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
 		},
 		manager: &mgr,
 	}
@@ -669,7 +766,7 @@ func TestNodeGroup_Others(t *testing.T) {
 	assert.Equal(t, 4, len(extendedDebug))
 	assert.Contains(t, extendedDebug, "node group ID: ng1 (min:1 max:7)")
 	for _, serverName := range []string{serverName1, serverName2, serverName3} {
-		assert.Contains(t, extendedDebug, fmt.Sprintf("instance ID: %s state: Running powerOn: false commandID: ", serverName))
+		assert.Contains(t, extendedDebug, fmt.Sprintf("instance ID: %s state: Running powerOn: true commandID: ", serverName))
 	}
 	assert.Equal(t, true, ng.Exist())
 	assert.Equal(t, false, ng.Autoprovisioned())
