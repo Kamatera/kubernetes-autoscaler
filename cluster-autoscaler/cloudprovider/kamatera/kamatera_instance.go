@@ -166,6 +166,8 @@ func (i *Instance) extendedDebug() string {
 	return fmt.Sprintf("instance ID: %s state: %s powerOn: %v commandID: %s", i.Id, state, i.PowerOn, i.StatusCommandId)
 }
 
+// countsTowardTarget returns true if the instance should be counted toward the target size of the node group.
+// it counts servers that are powered on, or that will be powered on
 func (i *Instance) countsTowardTarget() bool {
 	if i == nil || i.Status == nil || i.Status.State == cloudprovider.InstanceDeleting || i.Status.ErrorInfo != nil {
 		return false
@@ -173,9 +175,14 @@ func (i *Instance) countsTowardTarget() bool {
 	if i.PowerOn {
 		return true
 	}
+	// at this point state is either creating or running, but the server is powered off
+	// if server is creating and has an active command, we count it toward target assuming it will be powered on soon
+	// if server is running it's unexpected to be powered off, so we treat it same as creating with an active command
 	return i.StatusCommandId != ""
 }
 
+// visibleToAutoscaler returns true if the instance should be visible to the autoscaler for scaling decisions.
+// this includes instances counted towards target, but also instances being deleted or that failed to create
 func (i *Instance) visibleToAutoscaler() bool {
 	if i == nil || i.Status == nil {
 		return false
@@ -206,7 +213,7 @@ func (i *Instance) refresh(
 			klog.Warningf("%s: server not found and has no active command - removing from instances", logPrefix)
 			return true, needToHandleScaleDown
 		} else if i.Status != nil && i.Status.State == cloudprovider.InstanceDeleting && !i.PowerOn {
-			klog.V(2).Infof("%s: instance deleted and not powered on - setting statue to nil", logPrefix)
+			klog.V(2).Infof("%s: instance deleted and not powered on - setting status to nil", logPrefix)
 			i.Status = nil
 		} else if i.Status != nil && !i.PowerOn && i.Status.ErrorInfo == nil {
 			klog.Warningf("%s: status is %v but server is powered off and has no active command - clearing status", logPrefix, i.Status.State)
