@@ -678,6 +678,8 @@ max-size=3
 				CommandStatusComplete, nil,
 			).Once()
 			assert.NoError(t, kcp.Refresh())
+			// this is an unexpected condition, it's treated as server failed creating, because we expect server to be turned on after creation
+			// so target size is now 0 - we don't expect any more servers to be created
 			kcpAssertNodeGroup(&kcp, t, "ng1", 0, 3, map[string]kcpExpectedInstance{
 				"server1": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
