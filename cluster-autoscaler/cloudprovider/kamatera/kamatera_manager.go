@@ -23,8 +23,11 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 
+	apiv1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/client-go/kubernetes"
 
@@ -75,9 +78,20 @@ func (m *manager) refresh() error {
 	if err != nil {
 		return fmt.Errorf("failed to get list of Kamatera servers from Kamatera API: %v", err)
 	}
+	registeredInstanceIDs := map[string]struct{}{}
+	if needsKubernetesNodeLookup(servers, instancesSnapshot, m.config.providerIDPrefix) {
+		if m.kubeClient == nil {
+			return fmt.Errorf("failed to list Kubernetes nodes while checking externally powered-on Kamatera servers: Kubernetes client is nil")
+		}
+		nodes, err := m.kubeClient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to list Kubernetes nodes while checking externally powered-on Kamatera servers: %v", err)
+		}
+		registeredInstanceIDs = kubernetesNodeInstanceIDs(nodes.Items, m.config.providerIDPrefix)
+	}
 	nodeGroups := make(map[string]*NodeGroup)
 	for nodeGroupName, nodeGroupCfg := range m.config.nodeGroupCfg {
-		nodeGroup, err := m.buildNodeGroup(nodeGroupName, nodeGroupCfg, servers)
+		nodeGroup, err := m.buildNodeGroup(nodeGroupName, nodeGroupCfg, servers, registeredInstanceIDs)
 		if err != nil {
 			return fmt.Errorf("failed to build node group %s: %v", nodeGroupName, err)
 		}
@@ -96,9 +110,38 @@ func (m *manager) refresh() error {
 	return nil
 }
 
-func (m *manager) buildNodeGroup(name string, cfg *nodeGroupConfig, servers []Server) (*NodeGroup, error) {
+func needsKubernetesNodeLookup(servers []Server, instances map[string]*Instance, providerIDPrefix string) bool {
+	for _, server := range servers {
+		instance := instances[formatKamateraProviderID(providerIDPrefix, server.Name)]
+		if instance != nil && server.PowerOn && instance.requiresNodeBeforeAdoption &&
+			instance.Status == nil && instance.StatusCommandId == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func kubernetesNodeInstanceIDs(nodes []apiv1.Node, providerIDPrefix string) map[string]struct{} {
+	instanceIDs := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		if node.DeletionTimestamp != nil {
+			continue
+		}
+		serverName := node.Name
+		if node.Spec.ProviderID != "" {
+			serverName = parseKamateraProviderID(providerIDPrefix, node.Spec.ProviderID)
+			if serverName == node.Spec.ProviderID && strings.Contains(node.Spec.ProviderID, "://") {
+				continue
+			}
+		}
+		instanceIDs[formatKamateraProviderID(providerIDPrefix, serverName)] = struct{}{}
+	}
+	return instanceIDs
+}
+
+func (m *manager) buildNodeGroup(name string, cfg *nodeGroupConfig, servers []Server, registeredInstanceIDs map[string]struct{}) (*NodeGroup, error) {
 	// TODO: do validation of server args with Kamatera api
-	instances, err := m.getNodeGroupInstances(name, servers, cfg)
+	instances, err := m.getNodeGroupInstances(name, servers, cfg, registeredInstanceIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get instances for node group %s: %v", name, err)
 	}
@@ -203,7 +246,7 @@ func (m *manager) buildNodeGroup(name string, cfg *nodeGroupConfig, servers []Se
 	return ng, nil
 }
 
-func (m *manager) getNodeGroupInstances(name string, servers []Server, cfg *nodeGroupConfig) (map[string]*Instance, error) {
+func (m *manager) getNodeGroupInstances(name string, servers []Server, cfg *nodeGroupConfig, registeredInstanceIDs map[string]struct{}) (map[string]*Instance, error) {
 	clusterTag := fmt.Sprintf("%s%s", clusterServerTagPrefix, m.config.clusterName)
 	nodeGroupTag := fmt.Sprintf("%s%s", nodeGroupTagPrefix, name)
 	instances := make(map[string]*Instance)
@@ -233,9 +276,10 @@ func (m *manager) getNodeGroupInstances(name string, servers []Server, cfg *node
 		if m.instances[cloudProviderID] == nil {
 			// create a new instance object
 			instance := &Instance{
-				Id:      cloudProviderID,
-				PowerOn: server.PowerOn,
-				Tags:    server.Tags,
+				Id:                         cloudProviderID,
+				PowerOn:                    server.PowerOn,
+				Tags:                       server.Tags,
+				requiresNodeBeforeAdoption: !server.PowerOn,
 			}
 			refreshedInstanceProviderIDs = append(refreshedInstanceProviderIDs, cloudProviderID)
 			needToDelete, needToHandleScaleDown := instance.refresh(m.client, m.config.providerIDPrefix, true)
@@ -258,7 +302,15 @@ func (m *manager) getNodeGroupInstances(name string, servers []Server, cfg *node
 			instance.PowerOn = server.PowerOn
 			instance.Tags = server.Tags
 			refreshedInstanceProviderIDs = append(refreshedInstanceProviderIDs, cloudProviderID)
-			needToDelete, needToHandleScaleDown := instance.refresh(m.client, m.config.providerIDPrefix, true)
+			_, hasRegisteredNode := registeredInstanceIDs[cloudProviderID]
+			waitForNode := instance.requiresNodeBeforeAdoption && instance.PowerOn && instance.Status == nil &&
+				instance.StatusCommandId == "" && !hasRegisteredNode
+			needToDelete, needToHandleScaleDown := false, false
+			if waitForNode {
+				klog.V(2).Infof("Kamatera server %q was powered on externally; waiting for Kubernetes node registration", server.Name)
+			} else {
+				needToDelete, needToHandleScaleDown = instance.refresh(m.client, m.config.providerIDPrefix, true)
+			}
 			if needToDelete {
 				delete(m.instances, cloudProviderID)
 			} else if hasClusterTag && hasNodeGroupTag {

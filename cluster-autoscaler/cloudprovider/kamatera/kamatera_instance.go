@@ -42,6 +42,9 @@ type Instance struct {
 	Tags              []string
 	StatusCommandId   string
 	StatusCommandCode InstanceCommandCode
+	// requiresNodeBeforeAdoption prevents an externally powered-on, unmanaged server from being
+	// treated as running until it has registered as a Kubernetes node.
+	requiresNodeBeforeAdoption bool
 }
 
 // InstanceErrorCode represents error codes for instance operations
@@ -125,13 +128,14 @@ func (i *Instance) delete(client kamateraAPIClient, providerIDPrefix string, pow
 	if !powerOffOnScaleDown {
 		return i.terminate(client, providerIDPrefix)
 	}
-	i.Status = nil
+	i.markUnmanagedPoweredOff()
 	return nil
 }
 
 // update instance status to creating and start poweron command
 func (i *Instance) createPoweron(client kamateraAPIClient, providerIDPrefix string) error {
 	i.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating}
+	i.requiresNodeBeforeAdoption = false
 	ctx := context.Background()
 	serverName := parseKamateraProviderID(providerIDPrefix, i.Id)
 	commandId, err := client.StartServerRequest(ctx, ServerRequestPoweron, serverName)
@@ -164,6 +168,16 @@ func (i *Instance) extendedDebug() string {
 		state = "Deleting"
 	}
 	return fmt.Sprintf("instance ID: %s state: %s powerOn: %v commandID: %s", i.Id, state, i.PowerOn, i.StatusCommandId)
+}
+
+func (i *Instance) markRunning() {
+	i.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
+	i.requiresNodeBeforeAdoption = false
+}
+
+func (i *Instance) markUnmanagedPoweredOff() {
+	i.Status = nil
+	i.requiresNodeBeforeAdoption = true
 }
 
 // countsTowardTarget returns true if the instance should be counted toward the target size of the node group.
@@ -214,16 +228,16 @@ func (i *Instance) refresh(
 			return true, needToHandleScaleDown
 		} else if i.Status != nil && i.Status.State == cloudprovider.InstanceDeleting && !i.PowerOn {
 			klog.V(2).Infof("%s: instance deleted and not powered on - setting status to nil", logPrefix)
-			i.Status = nil
+			i.markUnmanagedPoweredOff()
 		} else if i.Status != nil && !i.PowerOn && i.Status.ErrorInfo == nil {
 			klog.Warningf("%s: status is %v but server is powered off and has no active command - clearing status", logPrefix, i.Status.State)
-			i.Status = nil
+			i.markUnmanagedPoweredOff()
 		} else if i.PowerOn && i.Status == nil {
 			klog.V(2).Infof("%s: node is powered on and status is nil, setting state to running", logPrefix)
-			i.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
+			i.markRunning()
 		} else if i.PowerOn && i.Status.State == cloudprovider.InstanceCreating {
 			klog.V(2).Infof("%s: node is powered on and status is creating, setting state to running", logPrefix)
-			i.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
+			i.markRunning()
 		}
 	} else {
 		commandID := i.StatusCommandId
@@ -269,7 +283,7 @@ func (i *Instance) refresh(
 				if i.Status.State == cloudprovider.InstanceCreating {
 					if i.PowerOn {
 						klog.V(2).Infof("%s server created and powered on", i.Id)
-						i.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
+						i.markRunning()
 					} else if commandCode == InstanceCommandPoweron {
 						klog.Warningf("%s poweron completed but server is still powered off - clearing status", commandLogPrefix)
 						i.Status = nil
@@ -283,7 +297,7 @@ func (i *Instance) refresh(
 						}
 					} else {
 						klog.Warningf("%s command completed but server is still powered off - clearing status", commandLogPrefix)
-						i.Status = nil
+						i.markUnmanagedPoweredOff()
 					}
 				} else if i.Status.State == cloudprovider.InstanceDeleting {
 					// instance deletion process - update state and complete the deletion process
@@ -318,7 +332,7 @@ func (i *Instance) handleScaleDown(
 		if err := clearAutoscalerMetadataFromNode(kubeClient, serverName); err != nil {
 			klog.Errorf("Instance %s powered off for scale down - failed to clear Kubernetes node metadata: %v", serverName, err)
 		}
-		i.Status = nil
+		i.markUnmanagedPoweredOff()
 		return true
 	}
 	// continue to terminate the instance

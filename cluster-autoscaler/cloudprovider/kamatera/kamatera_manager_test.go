@@ -25,9 +25,29 @@ import (
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
+
+const managerNodeAdoptionTestConfig = `
+[global]
+kamatera-api-client-id=1a222bbb3ccc44d5555e6ff77g88hh9i
+kamatera-api-secret=9ii88h7g6f55555ee4444444dd33eee2
+cluster-name=aaabbb
+default-datacenter=IL
+default-image=ubuntu
+default-cpu=1a
+default-ram=1024
+default-disk=size=10
+default-network=name=wan,ip=auto
+default-script-base64=ZGVmYXVsdAo=
+
+[nodegroup "ng1"]
+min-size=0
+max-size=2
+`
 
 func TestManager_newManager(t *testing.T) {
 	cfg := strings.NewReader(`
@@ -179,6 +199,170 @@ max-size=5
 	err = m.refresh()
 	assert.Error(t, err)
 	assert.Equal(t, "failed to get list of Kamatera servers from Kamatera API: error on API call", err.Error())
+}
+
+func TestManager_refresh_ExternallyPoweredOnWaitsForKubernetesNode(t *testing.T) {
+	cfg := strings.NewReader(managerNodeAdoptionTestConfig)
+	kubeClient := fake.NewSimpleClientset()
+	m, err := newManager(cfg, kubeClient)
+	assert.NoError(t, err)
+
+	client := kamateraClientMock{}
+	m.client = &client
+	ctx := context.Background()
+	serverName := mockKamateraServerName()
+	providerID := formatKamateraProviderID(m.config.providerIDPrefix, serverName)
+	tags := []string{
+		fmt.Sprintf("%s%s", clusterServerTagPrefix, "aaabbb"),
+		fmt.Sprintf("%s%s", nodeGroupTagPrefix, "ng1"),
+	}
+
+	client.On("ListServers", ctx, m.instances, "", defaultKamateraProviderIDPrefix).Return(
+		[]Server{{Name: serverName, Tags: tags, PowerOn: false}}, nil,
+	).Once()
+	assert.NoError(t, m.refresh())
+	assert.Nil(t, m.instances[providerID].Status)
+
+	client.On("ListServers", ctx, m.instances, "", defaultKamateraProviderIDPrefix).Return(
+		[]Server{{Name: serverName, Tags: tags, PowerOn: true}}, nil,
+	).Once()
+	assert.NoError(t, m.refresh())
+	assert.True(t, m.instances[providerID].PowerOn)
+	assert.Nil(t, m.instances[providerID].Status)
+	targetSize, err := m.nodeGroups["ng1"].TargetSize()
+	assert.NoError(t, err)
+	assert.Equal(t, 0, targetSize)
+	instances, err := m.nodeGroups["ng1"].Nodes()
+	assert.NoError(t, err)
+	assert.Empty(t, instances)
+	assert.True(t, m.instances[providerID].requiresNodeBeforeAdoption)
+
+	client.On("ListServers", ctx, m.instances, "", defaultKamateraProviderIDPrefix).Return(
+		[]Server{{Name: serverName, Tags: tags, PowerOn: false}}, nil,
+	).Once()
+	assert.NoError(t, m.refresh())
+	assert.False(t, m.instances[providerID].PowerOn)
+	assert.Nil(t, m.instances[providerID].Status)
+	assert.True(t, m.instances[providerID].requiresNodeBeforeAdoption)
+
+	client.On("ListServers", ctx, m.instances, "", defaultKamateraProviderIDPrefix).Return(
+		[]Server{{Name: serverName, Tags: tags, PowerOn: true}}, nil,
+	).Once()
+	assert.NoError(t, m.refresh())
+	assert.Nil(t, m.instances[providerID].Status)
+
+	assert.NoError(t, kubeClient.Tracker().Add(&apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: serverName},
+		Spec:       apiv1.NodeSpec{ProviderID: providerID},
+	}))
+	client.On("ListServers", ctx, m.instances, "", defaultKamateraProviderIDPrefix).Return(
+		[]Server{{Name: serverName, Tags: tags, PowerOn: true}}, nil,
+	).Once()
+	assert.NoError(t, m.refresh())
+	if assert.NotNil(t, m.instances[providerID].Status) {
+		assert.Equal(t, cloudprovider.InstanceRunning, m.instances[providerID].Status.State)
+	}
+	assert.False(t, m.instances[providerID].requiresNodeBeforeAdoption)
+	targetSize, err = m.nodeGroups["ng1"].TargetSize()
+	assert.NoError(t, err)
+	assert.Equal(t, 1, targetSize)
+}
+
+func TestManager_refresh_ExternalPowerOnNodeListErrorPreservesState(t *testing.T) {
+	kubeClient := fake.NewSimpleClientset()
+	m, err := newManager(strings.NewReader(managerNodeAdoptionTestConfig), kubeClient)
+	assert.NoError(t, err)
+
+	client := kamateraClientMock{}
+	m.client = &client
+	ctx := context.Background()
+	serverName := mockKamateraServerName()
+	providerID := formatKamateraProviderID(m.config.providerIDPrefix, serverName)
+	tags := []string{
+		fmt.Sprintf("%s%s", clusterServerTagPrefix, "aaabbb"),
+		fmt.Sprintf("%s%s", nodeGroupTagPrefix, "ng1"),
+	}
+
+	client.On("ListServers", ctx, m.instances, "", defaultKamateraProviderIDPrefix).Return(
+		[]Server{{Name: serverName, Tags: tags, PowerOn: false}}, nil,
+	).Once()
+	assert.NoError(t, m.refresh())
+	instance := m.instances[providerID]
+	assert.False(t, instance.PowerOn)
+	assert.True(t, instance.requiresNodeBeforeAdoption)
+
+	kubeClient.PrependReactor("list", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("node list unavailable")
+	})
+	client.On("ListServers", ctx, m.instances, "", defaultKamateraProviderIDPrefix).Return(
+		[]Server{{Name: serverName, Tags: tags, PowerOn: true}}, nil,
+	).Once()
+
+	err = m.refresh()
+
+	assert.EqualError(t, err, "failed to list Kubernetes nodes while checking externally powered-on Kamatera servers: node list unavailable")
+	assert.False(t, instance.PowerOn)
+	assert.Nil(t, instance.Status)
+	assert.True(t, instance.requiresNodeBeforeAdoption)
+}
+
+func TestManager_refresh_FreshPoweredOnInstancePreservesStartupBehavior(t *testing.T) {
+	kubeClient := fake.NewSimpleClientset()
+	m, err := newManager(strings.NewReader(managerNodeAdoptionTestConfig), kubeClient)
+	assert.NoError(t, err)
+
+	client := kamateraClientMock{}
+	m.client = &client
+	serverName := mockKamateraServerName()
+	providerID := formatKamateraProviderID(m.config.providerIDPrefix, serverName)
+	tags := []string{
+		fmt.Sprintf("%s%s", clusterServerTagPrefix, "aaabbb"),
+		fmt.Sprintf("%s%s", nodeGroupTagPrefix, "ng1"),
+	}
+	client.On("ListServers", context.Background(), m.instances, "", defaultKamateraProviderIDPrefix).Return(
+		[]Server{{Name: serverName, Tags: tags, PowerOn: true}}, nil,
+	).Once()
+
+	assert.NoError(t, m.refresh())
+	instance := m.instances[providerID]
+	if assert.NotNil(t, instance.Status) {
+		assert.Equal(t, cloudprovider.InstanceRunning, instance.Status.State)
+	}
+	assert.False(t, instance.requiresNodeBeforeAdoption)
+	targetSize, err := m.nodeGroups["ng1"].TargetSize()
+	assert.NoError(t, err)
+	assert.Equal(t, 1, targetSize)
+}
+
+func TestKubernetesNodeInstanceIDs(t *testing.T) {
+	providerIDPrefix := "rke2://"
+	deletionTimestamp := metav1.Now()
+	nodes := []apiv1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "configured"}, Spec: apiv1.NodeSpec{ProviderID: "rke2://configured"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "legacy-default"}, Spec: apiv1.NodeSpec{ProviderID: "kamatera://legacy-default"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "legacy-bare"}, Spec: apiv1.NodeSpec{ProviderID: "legacy-bare"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "empty-provider-id"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "not-ready"}, Spec: apiv1.NodeSpec{ProviderID: "rke2://not-ready"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "conflicting"}, Spec: apiv1.NodeSpec{ProviderID: "other://conflicting"}},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "deleting", DeletionTimestamp: &deletionTimestamp},
+			Spec:       apiv1.NodeSpec{ProviderID: "rke2://deleting"},
+		},
+	}
+
+	instanceIDs := kubernetesNodeInstanceIDs(nodes, providerIDPrefix)
+	actual := make([]string, 0, len(instanceIDs))
+	for instanceID := range instanceIDs {
+		actual = append(actual, instanceID)
+	}
+
+	assert.ElementsMatch(t, []string{
+		"rke2://configured",
+		"rke2://legacy-default",
+		"rke2://legacy-bare",
+		"rke2://empty-provider-id",
+		"rke2://not-ready",
+	}, actual)
 }
 
 func TestManager_refreshInvalidServerConfiguration(t *testing.T) {
@@ -493,7 +677,7 @@ func TestManager_getNodeGroupInstances_HandleScaleDownRespectsMaxPoweredOffServe
 			instances, err := m.getNodeGroupInstances("ng1", servers, &nodeGroupConfig{
 				PoweroffOnScaleDown:           true,
 				PoweroffOnScaleDownMaxServers: tt.maxPoweredOffServers,
-			})
+			}, nil)
 			assert.NoError(t, err)
 			instance, exists := instances[targetProviderID]
 			assert.True(t, exists)
@@ -538,7 +722,7 @@ func TestManager_getNodeGroupInstances_RemovesStaleCreatingInstanceMissingFromAP
 		instances: map[string]*Instance{staleProviderID: staleInstance},
 	}
 
-	instances, err := m.getNodeGroupInstances("ng1", nil, &nodeGroupConfig{})
+	instances, err := m.getNodeGroupInstances("ng1", nil, &nodeGroupConfig{}, nil)
 	assert.NoError(t, err)
 	assert.NotContains(t, instances, staleProviderID)
 	assert.NotContains(t, m.instances, staleProviderID)
