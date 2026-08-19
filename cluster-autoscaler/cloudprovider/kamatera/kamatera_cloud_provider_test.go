@@ -678,26 +678,30 @@ max-size=3
 				CommandStatusComplete, nil,
 			).Once()
 			assert.NoError(t, kcp.Refresh())
-			// this is an unexpected condition, it's treated as server failed creating, because we expect server to be turned on after creation
-			// so target size is now 0 - we don't expect any more servers to be created
-			kcpAssertNodeGroup(&kcp, t, "ng1", 0, 3, map[string]kcpExpectedInstance{
-				"server1": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
+			// A completed create command is trusted, even though the earlier ListServers snapshot did not include the server.
+			// PowerOn remains false until a later refresh, so the running instance is temporarily not visible or counted.
+			instanceRunning := cloudprovider.InstanceRunning
+			kcpAssertNodeGroup(&kcp, t, "ng1", 0, 2, map[string]kcpExpectedInstance{
+				"server1": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
 				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				"server3": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 			})
-			// now server 1 is listed but not powered on yet - doesn't change the instances state
+			// Server 1 is listed but still powered off, so it becomes an unmanaged powered-off server.
 			kcpKClientOnListServers(kamateraClient, &kcp, []Server{
 				{Name: "server1", PowerOn: false, Tags: ng.serverConfig.Tags},
 			}, nil).Once()
 			assert.NoError(t, kcp.Refresh())
-			kcpAssertNodeGroup(&kcp, t, "ng1", 0, 3, map[string]kcpExpectedInstance{
-				"server1": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
+			kcpAssertNodeGroup(&kcp, t, "ng1", 0, 2, map[string]kcpExpectedInstance{
+				"server1": {State: nil, CommandId: "", HasErrorInfo: false},
 				"server2": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				"server3": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 			})
-			// now server 1 is powered on - state set to running
+			// Server 1 is now powered on and registered, so it can be adopted as running.
 			// server 2 unexpectedly appears - but powered off, so state remains creating
-			instanceRunning := cloudprovider.InstanceRunning
+			assert.NoError(t, kubeClient.Tracker().Add(&apiv1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "server1"},
+				Spec:       apiv1.NodeSpec{ProviderID: formatKamateraProviderID(kcp.manager.config.providerIDPrefix, "server1")},
+			}))
 			kcpKClientOnListServers(kamateraClient, &kcp, []Server{
 				{Name: "server1", PowerOn: true, Tags: ng.serverConfig.Tags},
 				{Name: "server2", PowerOn: false, Tags: ng.serverConfig.Tags},
@@ -915,22 +919,22 @@ max-size=3
 			assert.NoError(t, kcp.Refresh())
 			if tt.poweronOnScaleUp && tt.poweroffOnScaleDown {
 				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 2, map[string]kcpExpectedInstance{
-					"server1": {State: nil, CommandId: "", HasErrorInfo: false},
+					"server1": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
 					"server2": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
 					"server3": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				})
 			} else if tt.poweroffOnScaleDown {
-				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 3, map[string]kcpExpectedInstance{
+				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 2, map[string]kcpExpectedInstance{
 					"server1": {State: nil, CommandId: "", HasErrorInfo: false},
 					"server2": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
 					"server3": {State: nil, CommandId: "", HasErrorInfo: false},
-					"server4": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
+					"server4": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
 					"server5": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				})
 			} else {
-				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 3, map[string]kcpExpectedInstance{
+				kcpAssertNodeGroup(&kcp, t, "ng1", 1, 2, map[string]kcpExpectedInstance{
 					"server2": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
-					"server4": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
+					"server4": {State: &instanceRunning, CommandId: "", HasErrorInfo: false},
 					"server5": {State: &instanceCreating, CommandId: "", HasErrorInfo: true},
 				})
 			}
