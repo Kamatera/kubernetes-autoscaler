@@ -18,6 +18,7 @@ package kamatera
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,7 +73,7 @@ func TestInstance_refresh_PoweroffOnScaleDownClearsNodeMetadata(t *testing.T) {
 	assert.True(t, taints.HasTaint(node, "custom"))
 }
 
-func TestInstance_refresh_PoweronCompleteWhilePoweredOffClearsStatus(t *testing.T) {
+func TestInstance_refresh_PoweronCompleteWhilePoweredOffMarksRunning(t *testing.T) {
 	providerIDPrefix := "rke2://"
 	serverName := mockKamateraServerName()
 	serverProviderID := formatKamateraProviderID(providerIDPrefix, serverName)
@@ -91,7 +92,14 @@ func TestInstance_refresh_PoweronCompleteWhilePoweredOffClearsStatus(t *testing.
 
 	assert.False(t, needToDelete)
 	assert.False(t, needToHandleScaleDown)
-	assert.Nil(t, instance.Status)
+	if assert.NotNil(t, instance.Status) {
+		assert.Equal(t, cloudprovider.InstanceRunning, instance.Status.State)
+		assert.Nil(t, instance.Status.ErrorInfo)
+	}
+	assert.False(t, instance.PowerOn)
+	assert.False(t, instance.requiresNodeBeforeAdoption)
+	assert.False(t, instance.countsTowardTarget())
+	assert.False(t, instance.visibleToAutoscaler())
 	assert.Equal(t, "", instance.StatusCommandId)
 	assert.Equal(t, InstanceCommandNone, instance.StatusCommandCode)
 }
@@ -145,7 +153,7 @@ func TestInstance_refresh_PoweredOffRunningInstanceRequiresNodeBeforeAdoption(t 
 	assert.True(t, instance.requiresNodeBeforeAdoption)
 }
 
-func TestInstance_refresh_UnexpectedCommandCompletePoweredOffRequiresNodeBeforeAdoption(t *testing.T) {
+func TestInstance_refresh_UnexpectedCommandCompletePoweredOffMarksRunning(t *testing.T) {
 	client := kamateraClientMock{}
 	client.On("getCommandStatus", context.Background(), "cmd-unknown").Return(CommandStatusComplete, nil).Once()
 	instance := &Instance{
@@ -160,11 +168,19 @@ func TestInstance_refresh_UnexpectedCommandCompletePoweredOffRequiresNodeBeforeA
 
 	assert.False(t, needToDelete)
 	assert.False(t, needToHandleScaleDown)
-	assert.Nil(t, instance.Status)
-	assert.True(t, instance.requiresNodeBeforeAdoption)
+	if assert.NotNil(t, instance.Status) {
+		assert.Equal(t, cloudprovider.InstanceRunning, instance.Status.State)
+		assert.Nil(t, instance.Status.ErrorInfo)
+	}
+	assert.False(t, instance.PowerOn)
+	assert.False(t, instance.requiresNodeBeforeAdoption)
+	assert.False(t, instance.countsTowardTarget())
+	assert.False(t, instance.visibleToAutoscaler())
+	assert.Equal(t, "", instance.StatusCommandId)
+	assert.Equal(t, InstanceCommandNone, instance.StatusCommandCode)
 }
 
-func TestInstance_refresh_CreateCompleteWhilePoweredOffSetsCreateError(t *testing.T) {
+func TestInstance_refresh_CreateCompleteWhilePoweredOffMarksRunning(t *testing.T) {
 	providerIDPrefix := "rke2://"
 	serverName := mockKamateraServerName()
 	serverProviderID := formatKamateraProviderID(providerIDPrefix, serverName)
@@ -183,13 +199,40 @@ func TestInstance_refresh_CreateCompleteWhilePoweredOffSetsCreateError(t *testin
 
 	assert.False(t, needToDelete)
 	assert.False(t, needToHandleScaleDown)
-	assert.NotNil(t, instance.Status)
-	assert.Equal(t, cloudprovider.InstanceCreating, instance.Status.State)
-	if assert.NotNil(t, instance.Status.ErrorInfo) {
-		assert.Equal(t, cloudprovider.OtherErrorClass, instance.Status.ErrorInfo.ErrorClass)
-		assert.Equal(t, "InstanceErrorCreatedPoweredOff", instance.Status.ErrorInfo.ErrorCode)
-		assert.Contains(t, instance.Status.ErrorInfo.ErrorMessage, "created but is still powered off")
+	if assert.NotNil(t, instance.Status) {
+		assert.Equal(t, cloudprovider.InstanceRunning, instance.Status.State)
+		assert.Nil(t, instance.Status.ErrorInfo)
 	}
+	assert.False(t, instance.PowerOn)
+	assert.False(t, instance.requiresNodeBeforeAdoption)
+	assert.False(t, instance.countsTowardTarget())
+	assert.False(t, instance.visibleToAutoscaler())
 	assert.Equal(t, "", instance.StatusCommandId)
 	assert.Equal(t, InstanceCommandNone, instance.StatusCommandCode)
+}
+
+func TestInstance_refresh_CommandStatusRequestErrorIsRetried(t *testing.T) {
+	client := kamateraClientMock{}
+	client.On("getCommandStatus", context.Background(), "cmd-create").
+		Return(CommandStatusPending, errors.New("temporary API error")).Once()
+	instance := &Instance{
+		Id:                "rke2://server1",
+		PowerOn:           false,
+		Status:            &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating},
+		StatusCommandId:   "cmd-create",
+		StatusCommandCode: InstanceCommandCreating,
+	}
+
+	needToDelete, needToHandleScaleDown := instance.refresh(&client, "rke2://", true)
+
+	assert.False(t, needToDelete)
+	assert.False(t, needToHandleScaleDown)
+	if assert.NotNil(t, instance.Status) {
+		assert.Equal(t, cloudprovider.InstanceCreating, instance.Status.State)
+		assert.Nil(t, instance.Status.ErrorInfo)
+	}
+	assert.Equal(t, "cmd-create", instance.StatusCommandId)
+	assert.Equal(t, InstanceCommandCreating, instance.StatusCommandCode)
+	assert.True(t, instance.countsTowardTarget())
+	assert.True(t, instance.visibleToAutoscaler())
 }
