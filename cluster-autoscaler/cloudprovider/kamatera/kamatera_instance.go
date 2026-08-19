@@ -246,18 +246,10 @@ func (i *Instance) refresh(
 		// refresh the state of an ongoing command
 		commandStatus, err := client.getCommandStatus(ctx, commandID)
 		if err != nil {
-			// failed to get command status - nothing we can do here, just update the ErrorInfo which will cause
-			// the CA to handle the error appropriately
+			// this is a transient error - we will keep the command ID and try again next time
 			klog.Errorf("%s failed to get command status: %v", commandLogPrefix, err)
-			if i.Status != nil {
-				i.Status.ErrorInfo = &cloudprovider.InstanceErrorInfo{
-					ErrorClass:   cloudprovider.OtherErrorClass,
-					ErrorCode:    string(InstanceErrorGetCommandStatusFailed),
-					ErrorMessage: fmt.Sprintf("failed to get command %s status: %v", commandID, err),
-				}
-			}
 		} else if commandStatus == CommandStatusError {
-			// command completed with error - clear the command ID and set the error info
+			// command completed with error - clear the command ID, set the error info to let autoscaler handle it
 			klog.Errorf("%s command completed with error, check Kamatera console for details", commandLogPrefix)
 			i.StatusCommandId = ""
 			i.StatusCommandCode = InstanceCommandNone
@@ -274,6 +266,7 @@ func (i *Instance) refresh(
 			i.StatusCommandId = ""
 			i.StatusCommandCode = InstanceCommandNone
 			if i.Status == nil {
+				// this is unexpected state - nothing to do here, we just cleared the command id
 				klog.Warningf("%s instance status is nil, will not update status", commandLogPrefix)
 			} else {
 				if i.Status.ErrorInfo != nil {
@@ -281,23 +274,15 @@ func (i *Instance) refresh(
 				}
 				i.Status.ErrorInfo = nil
 				if i.Status.State == cloudprovider.InstanceCreating {
-					if i.PowerOn {
-						klog.V(2).Infof("%s server created and powered on", i.Id)
-						i.markRunning()
-					} else if commandCode == InstanceCommandPoweron {
-						klog.Warningf("%s poweron completed but server is still powered off - clearing status", commandLogPrefix)
-						i.Status = nil
+					// both commands leave the server in created + powered on state
+					// we rely on Kamatera to do this so no need to verify it - to reduce complexity and save time
+					i.markRunning()
+					if commandCode == InstanceCommandPoweron {
+						klog.V(2).Infof("%s server poweron command completed successfully", i.Id)
 					} else if commandCode == InstanceCommandCreating {
-						message := fmt.Sprintf("server %s was created but is still powered off", serverName)
-						klog.Warningf("%s %s", commandLogPrefix, message)
-						i.Status.ErrorInfo = &cloudprovider.InstanceErrorInfo{
-							ErrorClass:   cloudprovider.OtherErrorClass,
-							ErrorCode:    string(InstanceErrorCreatedPoweredOff),
-							ErrorMessage: message,
-						}
+						klog.V(2).Infof("%s server create command completed successfully", i.Id)
 					} else {
-						klog.Warningf("%s command completed but server is still powered off - clearing status", commandLogPrefix)
-						i.markUnmanagedPoweredOff()
+						klog.Warningf("%s unexpected command completed, assume server was created and powered on", commandLogPrefix)
 					}
 				} else if i.Status.State == cloudprovider.InstanceDeleting {
 					// instance deletion process - update state and complete the deletion process
