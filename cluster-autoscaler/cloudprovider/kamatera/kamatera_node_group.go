@@ -253,7 +253,6 @@ func (n *NodeGroup) GetOptions(defaults config.NodeGroupAutoscalingOptions) (*co
 		MaxNodeProvisionTime:             time.Hour, // we can't cancel creation in progress so must give it enough time to complete
 		ZeroOrMaxNodeScaling:             defaults.ZeroOrMaxNodeScaling,
 		IgnoreDaemonSetsUtilization:      defaults.IgnoreDaemonSetsUtilization,
-		MaxNodeStartupTime:               defaults.MaxNodeStartupTime,
 	}, nil
 }
 
